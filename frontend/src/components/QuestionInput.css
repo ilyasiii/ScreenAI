@@ -1,0 +1,96 @@
+/* ══════════════════════════════════════════════════════════════════
+   QUESTION INPUT — Landing Quality Floating Pill
+   ══════════════════════════════════════════════════════════════════ */
+
+.question-input {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  max-width: 700px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  padding: 4px 4px 4px 20px;
+  box-shadow: var(--shadow-sm);
+  transition: border-color 0.2s ease;
+  gap: 0;
+  position: relative;
+}
+
+.question-input:focus-within {
+  border-color: rgba(59,130,246,0.35);
+}
+
+.question-input input {
+  flex: 1;
+  padding: 10px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 0.88rem;
+  outline: none;
+  min-width: 0;
+}
+
+.question-input input::placeholder {
+  color: var(--text-dim);
+}
+
+.question-input input:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ── Send Button (circular gradient, hero CTA style) ── */
+.question-input .btn-send {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--gradient-primary);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+
+.question-input .btn-send:hover:not(:disabled) {
+  filter: brightness(1.15);
+}
+
+.question-input .btn-send:active:not(:disabled) {
+  transform: scale(0.95);
+}
+
+.question-input .btn-send:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
+  transform: none;
+  filter: none;
+  box-shadow: none;
+}
+
+.question-input .btn-send svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ── Keyboard hint ── */
+.kbd-hint {
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  margin-right: 14px;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity var(--duration);
+  user-select: none;
+  font-weight: 500;
+}
+
+.question-input:focus-within .kbd-hint {
+  opacity: 1;
+}
