@@ -223,6 +223,19 @@
   color: var(--danger);
 }
 
+/* ── Today Usage Badge ── */
+.usage-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--gradient-subtle);
+  border: 1px solid var(--border-subtle);
+  padding: 3px 10px;
+  border-radius: var(--radius-full);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 /* ══════════════════════════════════════════════════════════════════
    QUESTION BAR
    ══════════════════════════════════════════════════════════════════ */

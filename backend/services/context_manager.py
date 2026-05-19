@@ -1,70 +1,51 @@
 """
 Context Manager Service
-Maintains a rolling window of previous screenshots so the AI
-can understand content that spans multiple screens.
-
-Each session gets its own context history. Screenshots are stored
-as base64 strings and the oldest are dropped when the limit is reached.
+Maintains all screenshots added to context plus a rolling window of
+conversation history so the AI has full context across a session.
 """
 
 import time
-import os
 from collections import defaultdict
 
-MAX_CONTEXT = int(os.getenv("MAX_CONTEXT_SCREENSHOTS", "5"))
-
-
-class ScreenshotEntry:
-    """Single screenshot with metadata."""
-
-    def __init__(self, image_base64: str, timestamp: float = None):
-        self.image_base64 = image_base64
-        self.timestamp = timestamp or time.time()
+# Keep last 10 messages (5 Q&A pairs) of conversation text per session
+MAX_CONVERSATION = 10
 
 
 class SessionContext:
-    """Manages screenshot context for a single user session."""
+    """Manages screenshot context and conversation history for a single user session."""
 
-    def __init__(self, max_screenshots: int = MAX_CONTEXT):
-        self.max_screenshots = max_screenshots
-        self.screenshots: list[ScreenshotEntry] = []
-        self.last_activity = time.time()
+    def __init__(self):
+        self.screenshots: list[str] = []
+        self.last_activity: float = time.time()
+        # Stores {"role": "user"|"assistant", "content": "..."} pairs
+        self.conversation_history: list[dict] = []
 
     def add_screenshot(self, image_base64: str) -> int:
-        """
-        Add a new screenshot to the context.
-        Returns the current count of screenshots in context.
-        """
-        entry = ScreenshotEntry(image_base64)
-        self.screenshots.append(entry)
         self.last_activity = time.time()
-
-        # Trim old screenshots if over the limit
-        if len(self.screenshots) > self.max_screenshots:
-            self.screenshots = self.screenshots[-self.max_screenshots :]
-
+        self.screenshots.append(image_base64)
         return len(self.screenshots)
 
     def get_context_images(self) -> list[str]:
-        """
-        Return all screenshots in context as base64 strings,
-        ordered from oldest to newest (chronological).
-        """
-        return [s.image_base64 for s in self.screenshots]
+        self.last_activity = time.time()
+        return list(self.screenshots)
 
-    def clear(self):
-        """Clear all context for this session."""
+    def add_message(self, role: str, content: str):
+        """Append a Q&A turn. Keeps only the last MAX_CONVERSATION messages."""
+        self.last_activity = time.time()
+        self.conversation_history.append({"role": role, "content": content})
+        if len(self.conversation_history) > MAX_CONVERSATION:
+            self.conversation_history = self.conversation_history[-MAX_CONVERSATION:]
+
+    def get_conversation_history(self) -> list[dict]:
+        return list(self.conversation_history)
+
+    def clear_screenshots(self):
+        """Clear only stored screenshots. Conversation history is preserved."""
         self.screenshots = []
-
-    def get_context_count(self) -> int:
-        return len(self.screenshots)
 
 
 class ContextManager:
-    """
-    Manages contexts for multiple sessions.
-    Each session_id maps to its own SessionContext.
-    """
+    """Manages contexts for multiple sessions."""
 
     def __init__(self):
         self._sessions: dict[str, SessionContext] = defaultdict(SessionContext)
@@ -78,24 +59,27 @@ class ContextManager:
     def get_context_images(self, session_id: str) -> list[str]:
         return self._sessions[session_id].get_context_images()
 
+    def add_message(self, session_id: str, role: str, content: str):
+        self._sessions[session_id].add_message(role, content)
+
+    def get_conversation_history(self, session_id: str) -> list[dict]:
+        return self._sessions[session_id].get_conversation_history()
+
     def clear_session(self, session_id: str):
+        """Clear saved screenshots only. Conversation history is kept."""
         if session_id in self._sessions:
-            self._sessions[session_id].clear()
+            self._sessions[session_id].clear_screenshots()
 
     def delete_session(self, session_id: str):
         self._sessions.pop(session_id, None)
 
-    def cleanup_old_sessions(self, max_age_seconds: int = 3600):
-        """Remove sessions inactive for more than max_age_seconds."""
-        now = time.time()
-        expired = [
-            sid
-            for sid, ctx in self._sessions.items()
-            if now - ctx.last_activity > max_age_seconds
-        ]
-        for sid in expired:
+    def cleanup_old_sessions(self, max_age_seconds: int = 3600) -> int:
+        """Remove sessions idle for longer than max_age_seconds. Returns count removed."""
+        cutoff = time.time() - max_age_seconds
+        stale = [sid for sid, ctx in self._sessions.items() if ctx.last_activity < cutoff]
+        for sid in stale:
             del self._sessions[sid]
-        return len(expired)
+        return len(stale)
 
 
 # Global singleton instance

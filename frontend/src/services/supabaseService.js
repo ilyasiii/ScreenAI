@@ -32,22 +32,19 @@ export async function trackUsage(userId) {
   }
 }
 
-/** Fetch analysis history for the current user */
-export async function getHistory(userId, limit = 50) {
+/** Get analysis history for a user (most recent first) */
+export async function getHistory(userId, limit = 30) {
   const { data, error } = await supabase
     .from("analysis_history")
     .select("id, question, answer, created_at")
     .eq("user_id", userId)
     .order("created_at", { ascending: false })
     .limit(limit);
-  if (error) {
-    console.error("Failed to load history:", error.message);
-    return [];
-  }
-  return data;
+  if (error) console.error("Failed to get history:", error.message);
+  return data || [];
 }
 
-/** Get today's usage count */
+/** Get today's analysis count for a user */
 export async function getTodayUsage(userId) {
   const today = new Date().toISOString().slice(0, 10);
   const { data } = await supabase
@@ -56,5 +53,6 @@ export async function getTodayUsage(userId) {
     .eq("user_id", userId)
     .eq("date", today)
     .single();
-  return data?.api_calls ?? 0;
+  return data?.api_calls || 0;
 }
+

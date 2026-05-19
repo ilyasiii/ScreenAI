@@ -7,6 +7,7 @@ import App from './App.jsx'
 import LandingPage from './pages/LandingPage.jsx'
 import AuthPage from './pages/AuthPage.jsx'
 import ResetPasswordPage from './pages/ResetPasswordPage.jsx'
+import HistoryPage from './pages/HistoryPage.jsx'
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -31,6 +32,7 @@ createRoot(document.getElementById('root')).render(
           <Route path="/auth" element={<PublicOnly><AuthPage /></PublicOnly>} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/app" element={<ProtectedRoute><App /></ProtectedRoute>} />
+          <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

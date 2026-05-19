@@ -83,7 +83,7 @@ export function analyzeScreenStream(sessionId, imageBase64 = null, question = nu
               if (data.token) {
                 onToken(data.token);
               } else if (data.done) {
-                onDone({ context_count: data.context_count });
+                onDone({ context_count: data.context_count, usage: data.usage || null });
               } else if (data.error) {
                 onError(data.error);
               }

@@ -3,6 +3,7 @@ Analyze Router - with SSE streaming for fast perceived response
 """
 
 import json
+import asyncio
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -10,7 +11,7 @@ from typing import Optional
 import uuid
 
 from services.context_manager import context_manager
-from services.gemini_vision import analyze_screenshots, analyze_screenshots_stream
+from services.openai_vision import analyze_screenshots_stream, compress_image, CTX_MAX_DIMENSION
 
 router = APIRouter(tags=["analyze"])
 
@@ -26,19 +27,8 @@ class AnalyzeRequest(BaseModel):
     image_base64: Optional[str] = None
     question: Optional[str] = None
 
-class AnalyzeResponse(BaseModel):
-    answer: str
-    model: str
-    context_count: int
-    usage: dict
-
 class SessionResponse(BaseModel):
     session_id: str
-
-class ContextStatusResponse(BaseModel):
-    session_id: str
-    screenshot_count: int
-    max_context: int
 
 
 # --- Endpoints ---
@@ -54,7 +44,13 @@ async def create_session():
 async def add_screenshot(req: ScreenshotRequest):
     if not req.image_base64:
         raise HTTPException(status_code=400, detail="image_base64 is required")
-    count = context_manager.add_screenshot(req.session_id, req.image_base64)
+    # Compress to context quality in a thread pool — non-blocking, result cached
+    # for all future analyze requests (never recompressed again)
+    loop = asyncio.get_running_loop()
+    compressed = await loop.run_in_executor(
+        None, compress_image, req.image_base64, CTX_MAX_DIMENSION, 40
+    )
+    count = context_manager.add_screenshot(req.session_id, compressed)
     return {"status": "ok", "context_count": count, "session_id": req.session_id}
 
 
@@ -65,17 +61,29 @@ async def analyze_stream(req: AnalyzeRequest):
     Current screenshot is NOT stored in context. Context only from /screenshot/add.
     """
     context_images = context_manager.get_context_images(req.session_id)
-    all_images = list(context_images)
-    if req.image_base64:
-        all_images.append(req.image_base64)
-    if not all_images:
+    conv_history = context_manager.get_conversation_history(req.session_id)
+    if not context_images and not req.image_base64:
         raise HTTPException(status_code=400, detail="No screenshot provided.")
 
     async def event_generator():
         try:
-            async for token in analyze_screenshots_stream(all_images, req.question):
-                yield f"data: {json.dumps({'token': token})}\n\n"
-            yield f"data: {json.dumps({'done': True, 'context_count': len(context_images)})}\n\n"
+            usage = None
+            full_response = ""
+            async for token in analyze_screenshots_stream(context_images, req.image_base64, req.question, conv_history):
+                if isinstance(token, dict) and "__usage__" in token:
+                    usage = token["__usage__"]
+                else:
+                    full_response += token
+                    yield f"data: {json.dumps({'token': token})}\n\n"
+            # Save every Q&A turn to conversation history so follow-up analyzes
+            # ("now optimize the above solution") have the prior context they need.
+            user_text = req.question or "Analyze the screen."
+            context_manager.add_message(req.session_id, "user", user_text)
+            context_manager.add_message(req.session_id, "assistant", full_response)
+            done_data: dict = {"done": True, "context_count": len(context_images)}
+            if usage:
+                done_data["usage"] = usage
+            yield f"data: {json.dumps(done_data)}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)})}\n\n"
 
@@ -87,41 +95,6 @@ async def analyze_stream(req: AnalyzeRequest):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",  # Disable nginx buffering if behind proxy
         },
-    )
-
-
-@router.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(req: AnalyzeRequest):
-    """Non-streaming fallback."""
-    context_images = context_manager.get_context_images(req.session_id)
-    all_images = list(context_images)
-    if req.image_base64:
-        all_images.append(req.image_base64)
-    if not all_images:
-        raise HTTPException(status_code=400, detail="No screenshot provided.")
-
-    try:
-        result = await analyze_screenshots(all_images, req.question)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except RuntimeError as e:
-        raise HTTPException(status_code=502, detail=str(e))
-
-    return AnalyzeResponse(
-        answer=result["answer"],
-        model=result["model"],
-        context_count=len(context_images),
-        usage=result["usage"],
-    )
-
-
-@router.get("/context/status/{session_id}", response_model=ContextStatusResponse)
-async def context_status(session_id: str):
-    session = context_manager.get_session(session_id)
-    return ContextStatusResponse(
-        session_id=session_id,
-        screenshot_count=session.get_context_count(),
-        max_context=session.max_screenshots,
     )
 
 

@@ -3,7 +3,7 @@
  * 
  * A screen-reading AI assistant that captures your screen,
  * maintains context across multiple screenshots, and uses
- * GPT-4o Vision to answer any questions visible on screen.
+ * GPT-4.1 Vision to answer any questions visible on screen.
  */
 import { useState, useEffect, useCallback } from "react";
 import { Link, useNavigate } from "react-router-dom";
@@ -16,7 +16,7 @@ import {
   clearContext,
   checkHealth,
 } from "./services/api";
-import { saveAnalysis, trackUsage } from "./services/supabaseService";
+import { saveAnalysis, trackUsage, getTodayUsage } from "./services/supabaseService";
 import ScreenPreview from "./components/ScreenPreview";
 import AnswerPanel from "./components/AnswerPanel";
 import QuestionInput from "./components/QuestionInput";
@@ -35,6 +35,7 @@ function App() {
   const [backendStatus, setBackendStatus] = useState(null);
   const [statusMessage, setStatusMessage] = useState("");
   const [modelName, setModelName] = useState("");
+  const [todayUsage, setTodayUsage] = useState(0);
 
   // Screen capture hook
   const {
@@ -52,19 +53,22 @@ function App() {
     async function init() {
       try {
         const health = await checkHealth();
-        if (!health.ai_configured) {
+        if (!health.openai_configured) {
           setBackendStatus("error");
           setStatusMessage(
-            "⚠️ Gemini API key not configured. Edit backend/.env and set your GEMINI_API_KEY."
+            "⚠️ OpenAI API key not configured. Edit backend/.env and set your OPENAI_API_KEY."
           );
           return;
         }
         setBackendStatus("ok");
         setModelName(health.model);
-        setStatusMessage(`Connected • Model: ${health.model}`);
 
         const sid = await createSession();
         setSessionId(sid);
+
+        if (user?.id) {
+          getTodayUsage(user.id).then(setTodayUsage);
+        }
       } catch (err) {
         setBackendStatus("error");
         setStatusMessage(
@@ -89,9 +93,7 @@ function App() {
   }, [startCapture, sessionId]);
 
   // ─── Handle stopping capture ─────────────────────────────────────────
-  const handleStopCapture = useCallback(() => {
-    stopCapture();
-  }, [stopCapture]);
+  // (stopCapture from hook is passed directly to ScreenPreview)
 
   // ─── Capture frame and add to context (for multi-screen questions) ───
   const handleCaptureContext = useCallback(async () => {
@@ -128,9 +130,6 @@ function App() {
       // Create a live answer entry that updates as tokens stream in
       const liveAnswer = {
         answer: "",
-        model: "",
-        contextCount: 0,
-        usage: null,
         question: question,
         timestamp: new Date().toLocaleTimeString(),
         streaming: true,
@@ -153,7 +152,6 @@ function App() {
         // onDone
         (info) => {
           liveAnswer.streaming = false;
-          liveAnswer.contextCount = info.context_count;
           setContextCount(info.context_count);
           setAnswers((prev) => {
             const updated = [...prev];
@@ -167,6 +165,7 @@ function App() {
           if (user?.id) {
             saveAnalysis(user.id, question, liveAnswer.answer);
             trackUsage(user.id);
+            setTodayUsage((n) => n + 1);
           }
         },
         // onError
@@ -192,19 +191,11 @@ function App() {
     try {
       await clearContext(sessionId);
       setContextCount(0);
-      setStatusMessage("🗑️ Context cleared");
+      setStatusMessage("� Screenshots cleared  •  conversation kept");
     } catch (err) {
       console.error("Failed to clear context:", err);
     }
   }, [sessionId]);
-
-  // ─── Handle question from input ──────────────────────────────────────
-  const handleAskQuestion = useCallback(
-    (question) => {
-      handleAnalyze(question);
-    },
-    [handleAnalyze]
-  );
 
   return (
     <div className="app">
@@ -228,12 +219,16 @@ function App() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
             <span>Home</span>
           </Link>
+          <Link to="/history" className="back-link">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="9"/></svg>
+            <span>History</span>
+          </Link>
         </div>
         <div className="header-right">
           {backendStatus === "ok" ? (
             <div className="status-group">
               <span className="status-dot" />
-              <span className="status-model">{modelName}</span>
+              <span className="status-model">{statusMessage || modelName}</span>
             </div>
           ) : (
             <div className={`backend-status ${backendStatus || ""}`}>
@@ -245,6 +240,11 @@ function App() {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               Clear
             </button>
+          )}
+          {todayUsage > 0 && (
+            <span className="usage-badge" title="Analyses today">
+              {todayUsage} today
+            </span>
           )}
           {user && (
             <div className="user-menu">
@@ -265,7 +265,7 @@ function App() {
       {/* Question Input */}
       <div className="question-bar">
         <QuestionInput
-          onSubmit={handleAskQuestion}
+          onSubmit={handleAnalyze}
           isAnalyzing={isAnalyzing}
           isSharing={isSharing}
         />
@@ -278,7 +278,7 @@ function App() {
           <ScreenPreview
             isSharing={isSharing}
             onStartCapture={handleStartCapture}
-            onStopCapture={handleStopCapture}
+            onStopCapture={stopCapture}
             onCaptureAndAnalyze={() => handleAnalyze(null)}
             onCaptureContext={handleCaptureContext}
             videoRef={videoRef}
