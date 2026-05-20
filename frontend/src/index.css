@@ -6,10 +6,10 @@
 
 :root {
   /* ── Backgrounds ── */
-  --bg-base:       #06060e;
-  --bg-surface:    #0c0c1a;
-  --bg-card:       #111127;
-  --bg-elevated:   #1a1a3e;
+  --bg-base:       #0d0d1a;
+  --bg-surface:    #13132a;
+  --bg-card:       #1a1a35;
+  --bg-elevated:   #222248;
 
   /* ── Borders ── */
   --border-subtle:  rgba(255, 255, 255, 0.06);
