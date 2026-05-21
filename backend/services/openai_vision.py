@@ -73,9 +73,22 @@ def build_messages(
     current_image: str | None,
     user_question: str | None = None,
     conversation_history: list[dict] | None = None,
+    profile: dict | None = None,
 ) -> list[dict]:
     """Assemble the OpenAI message array. All images must be pre-compressed base64 JPEGs."""
-    messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system = SYSTEM_PROMPT
+    if profile:
+        parts = ["\n\n--- CANDIDATE CONTEXT ---"]
+        if profile.get("job_title"):
+            parts.append(f"Target Role: {profile['job_title']}")
+        if profile.get("job_description"):
+            parts.append(f"Job Description:\n{profile['job_description']}")
+        if profile.get("cv_text"):
+            parts.append(f"Candidate CV:\n{profile['cv_text']}")
+        parts.append("Answer AS this candidate. Tailor your answers to match the job requirements and the candidate's background.")
+        system += "\n".join(parts)
+
+    messages: list[dict] = [{"role": "system", "content": system}]
 
     # Inject previous Q&A turns as plain text so the AI has conversation memory
     if conversation_history:
@@ -124,6 +137,7 @@ async def analyze_screenshots_stream(
     current_image: str | None,
     user_question: str | None = None,
     conversation_history: list[dict] | None = None,
+    profile: dict | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream analysis token-by-token.
     Context images must be pre-compressed (stored that way in SessionContext).
@@ -142,7 +156,7 @@ async def analyze_screenshots_stream(
             None, compress_image, current_image, MAX_DIMENSION, JPEG_QUALITY
         )
 
-    messages = build_messages(context_images, current_compressed, user_question, conversation_history)
+    messages = build_messages(context_images, current_compressed, user_question, conversation_history, profile)
 
     stream = await client.chat.completions.create(
         model=MODEL,

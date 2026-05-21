@@ -75,6 +75,31 @@
   gap: 12px;
 }
 
+.btn-interview-data {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: rgba(102, 126, 234, 0.1);
+  border: 1px solid rgba(102, 126, 234, 0.3);
+  border-radius: 6px;
+  color: #667eea;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.btn-interview-data:hover {
+  background: rgba(102, 126, 234, 0.2);
+  border-color: #667eea;
+}
+
+.btn-interview-data svg {
+  width: 14px;
+  height: 14px;
+}
+
 .back-link {
   display: inline-flex;
   align-items: center;

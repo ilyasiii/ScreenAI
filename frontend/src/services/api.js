@@ -38,21 +38,25 @@ export async function addScreenshot(sessionId, imageBase64) {
  * @param {function} onToken - called with each text chunk as it arrives
  * @param {function} onDone - called with {context_count} when stream ends
  * @param {function} onError - called with error message
+ * @param {object|null} profile - optional profile { job_title, job_description, cv_text }
  * @returns {function} abort — call to cancel the stream
  */
-export function analyzeScreenStream(sessionId, imageBase64 = null, question = null, onToken, onDone, onError) {
+export function analyzeScreenStream(sessionId, imageBase64 = null, question = null, onToken, onDone, onError, profile = null) {
   const controller = new AbortController();
 
   (async () => {
     try {
+      const body = {
+        session_id: sessionId,
+        image_base64: imageBase64,
+        question: question,
+      };
+      if (profile) body.profile = profile;
+
       const res = await fetch(`${API_BASE}/analyze/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          image_base64: imageBase64,
-          question: question,
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
 

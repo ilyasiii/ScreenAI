@@ -9,6 +9,7 @@ export default function ScreenPreview({
   onStopCapture,
   onCaptureAndAnalyze,
   onCaptureContext,
+  onClearContext,
   videoRef,
   error,
   contextCount,
@@ -86,6 +87,17 @@ export default function ScreenPreview({
               Context
               {contextCount > 0 && <span className="ctx-badge">{contextCount}</span>}
             </button>
+
+            {contextCount > 0 && (
+              <button
+                className="btn btn-ghost"
+                onClick={onClearContext}
+                title="Clear all context screenshots"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                Clear
+              </button>
+            )}
 
             <button className="btn btn-ghost" onClick={onStopCapture}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>

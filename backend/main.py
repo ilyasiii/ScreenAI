@@ -17,6 +17,7 @@ _env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(_env_path)
 
 from routers import analyze
+from routers import voice
 from services.context_manager import context_manager
 
 
@@ -54,6 +55,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(analyze.router, prefix="/api")
+app.include_router(voice.router)
 
 
 @app.get("/")

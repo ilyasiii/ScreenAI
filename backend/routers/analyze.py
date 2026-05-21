@@ -26,6 +26,7 @@ class AnalyzeRequest(BaseModel):
     session_id: str
     image_base64: Optional[str] = None
     question: Optional[str] = None
+    profile: Optional[dict] = None
 
 class SessionResponse(BaseModel):
     session_id: str
@@ -69,7 +70,7 @@ async def analyze_stream(req: AnalyzeRequest):
         try:
             usage = None
             full_response = ""
-            async for token in analyze_screenshots_stream(context_images, req.image_base64, req.question, conv_history):
+            async for token in analyze_screenshots_stream(context_images, req.image_base64, req.question, conv_history, req.profile):
                 if isinstance(token, dict) and "__usage__" in token:
                     usage = token["__usage__"]
                 else:
