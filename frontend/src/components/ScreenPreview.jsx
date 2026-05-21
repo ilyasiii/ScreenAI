@@ -1,5 +1,5 @@
 /**
- * ScreenPreview Component — Clean Minimal Tool UI
+ * ScreenPreview Component — Professional Dashboard Panel
  */
 import "./ScreenPreview.css";
 
@@ -17,18 +17,25 @@ export default function ScreenPreview({
 }) {
   return (
     <div className="screen-preview">
-      {/* Compact Header */}
+      {/* Header */}
       <div className="preview-header">
-        <h3 className="preview-title">Screen</h3>
+        <div className="preview-header-left">
+          <svg className="panel-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+            <line x1="8" y1="21" x2="16" y2="21" />
+            <line x1="12" y1="17" x2="12" y2="21" />
+          </svg>
+          <h3 className="preview-title">Screen Share</h3>
+        </div>
         <div className="status-badge" data-active={isSharing}>
           <span className="status-dot"></span>
-          {isSharing ? "Live" : "Off"}
+          {isSharing ? "Live" : "Inactive"}
         </div>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
 
-      {/* Video Area — Clean, no browser chrome */}
+      {/* Video / Placeholder Area */}
       <div className="preview-area">
         <video
           ref={videoRef}
@@ -40,25 +47,27 @@ export default function ScreenPreview({
         />
         {!isSharing && (
           <div className="placeholder">
-            <svg className="placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-              <line x1="8" y1="21" x2="16" y2="21" />
-              <line x1="12" y1="17" x2="12" y2="21" />
-            </svg>
-            <p className="placeholder-text">Click below to share your screen</p>
+            <div className="placeholder-icon-wrapper">
+              <svg className="placeholder-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="8" y1="21" x2="16" y2="21" />
+                <line x1="12" y1="17" x2="12" y2="21" />
+              </svg>
+            </div>
+            <h2 className="placeholder-heading">No screen is being shared</h2>
+            <p className="placeholder-text">Share your screen to let AI analyze your content and provide intelligent insights.</p>
+            <button className="btn btn-share" onClick={onStartCapture}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              Share Screen
+            </button>
           </div>
         )}
       </div>
 
-      {/* Compact Action Buttons */}
-      <div className="controls">
-        {!isSharing ? (
-          <button className="btn btn-primary" onClick={onStartCapture}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-            Share Screen
-          </button>
-        ) : (
-          <>
+      {/* Action Buttons (when sharing) */}
+      {isSharing && (
+        <div className="controls">
+          <div className="controls-active">
             <button
               className={`btn btn-primary${!isAnalyzing ? " pulse-ready" : ""}`}
               onClick={onCaptureAndAnalyze}
@@ -103,9 +112,11 @@ export default function ScreenPreview({
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
               Stop
             </button>
-          </>
-        )}
-      </div>
+          </div>
+        </div>
+      )}
+
+
     </div>
   );
 }

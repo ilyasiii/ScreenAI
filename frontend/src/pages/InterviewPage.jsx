@@ -13,7 +13,7 @@ import "./InterviewPage.css";
 const WS_URL = "ws://localhost:8000/ws/voice";
 
 export default function InterviewPage() {
-  const { user } = useAuth();
+  const { user, signOut } = useAuth();
   const { profile } = useProfile();
   const [state, setState] = useState("idle"); // idle | recording | transcribing | answering
   const [transcript, setTranscript] = useState("");
@@ -23,6 +23,17 @@ export default function InterviewPage() {
   const [error, setError] = useState("");
   const [recordingTime, setRecordingTime] = useState(0);
   const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+
+  // ─── Close user menu on click outside ──────────────────────────────
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const handleClick = (e) => {
+      if (!e.target.closest(".user-menu-wrapper")) setShowUserMenu(false);
+    };
+    document.addEventListener("click", handleClick);
+    return () => document.removeEventListener("click", handleClick);
+  }, [showUserMenu]);
 
   const wsRef = useRef(null);
   const timerRef = useRef(null);
@@ -210,22 +221,24 @@ export default function InterviewPage() {
             </div>
             <span className="logo-text">ScreenAI</span>
           </Link>
-          <Link to="/app" className="nav-link-btn">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-            Screen
-          </Link>
-          <span className="nav-link-btn active">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-            Interview
-          </span>
+          <nav className="header-nav">
+            <Link to="/app" className="nav-tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              Home
+            </Link>
+            <span className="nav-tab active">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+              Interview
+            </span>
+            <Link to="/history" className="nav-tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              History
+            </Link>
+          </nav>
         </div>
         <div className="header-right">
-          <div className={`connection-status ${connected ? "connected" : "disconnected"}`}>
-            <span className="conn-dot"></span>
-            {connected ? "Connected" : "Disconnected"}
-          </div>
           <button
-            className="btn-interview-data"
+            className="header-btn primary"
             onClick={() => setShowProfileModal(true)}
             title="Update interview data"
           >
@@ -233,8 +246,27 @@ export default function InterviewPage() {
             Interview Data
           </button>
           {user && (
-            <div className="user-avatar">
-              {(user.email?.[0] || "U").toUpperCase()}
+            <div className="user-menu-wrapper">
+              <div className="user-menu" onClick={() => setShowUserMenu(!showUserMenu)}>
+                <div className="user-avatar">
+                  {user.user_metadata?.full_name
+                    ? user.user_metadata.full_name.split(" ").map(n => n[0]).join("").toUpperCase().slice(0, 2)
+                    : (user.email?.slice(0, 2) || "U").toUpperCase()}
+                </div>
+                <div className="user-info">
+                  <span className="user-name">{user.user_metadata?.full_name || user.email?.split("@")[0] || "User"}</span>
+                  <span className="user-email">{user.email}</span>
+                </div>
+                <svg className="dropdown-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+              </div>
+              {showUserMenu && (
+                <div className="user-dropdown">
+                  <button className="dropdown-item" onClick={signOut}>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                    Sign out
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -244,66 +276,63 @@ export default function InterviewPage() {
       <main className="interview-main">
         {/* Left: Controls & Status */}
         <section className="interview-controls-panel">
-          <div className="controls-header">
-            <h2>Interview Mode</h2>
-            <p className="controls-subtitle">
-              Hold the button (or press Space) while the interviewer speaks. Release to get an AI answer.
-            </p>
-          </div>
-
           {error && <div className="interview-error">{error}</div>}
 
-          {/* Record Button */}
-          <div className="record-section">
-            <button
-              className={`record-btn ${state === "recording" ? "recording" : ""}`}
-              onPointerDown={handlePointerDown}
-              onPointerUp={handlePointerUp}
-              onPointerLeave={state === "recording" ? handlePointerUp : undefined}
-              disabled={!connected || state === "transcribing" || state === "answering"}
-            >
-              <div className="record-btn-inner">
-                {state === "recording" ? (
-                  <div className="recording-pulse"></div>
-                ) : (
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                    <line x1="12" y1="19" x2="12" y2="23"/>
-                    <line x1="8" y1="23" x2="16" y2="23"/>
-                  </svg>
-                )}
+          {/* Centered Record Area */}
+          <div className="record-center">
+            <div className="record-section">
+              <div className="record-icon-wrapper">
+                <button
+                  className={`record-btn ${state === "recording" ? "recording" : ""}`}
+                  onPointerDown={handlePointerDown}
+                  onPointerUp={handlePointerUp}
+                  onPointerLeave={state === "recording" ? handlePointerUp : undefined}
+                  disabled={!connected || state === "transcribing" || state === "answering"}
+                >
+                  <div className="record-btn-inner">
+                    {state === "recording" ? (
+                      <div className="recording-pulse"></div>
+                    ) : (
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                        <line x1="12" y1="19" x2="12" y2="23"/>
+                        <line x1="8" y1="23" x2="16" y2="23"/>
+                      </svg>
+                    )}
+                  </div>
+                </button>
               </div>
-            </button>
-            <div className="record-label">
-              {state === "recording" && <span className="rec-time">{recordingTime.toFixed(1)}s</span>}
-              {state === "idle" && "Hold to Record"}
-              {state === "transcribing" && "Transcribing…"}
-              {state === "answering" && "Generating answer…"}
+              <div className="record-label">
+                {state === "recording" && <span className="rec-time">{recordingTime.toFixed(1)}s</span>}
+                {state === "idle" && "Hold to Record"}
+                {state === "transcribing" && "Transcribing…"}
+                {state === "answering" && "Generating answer…"}
+              </div>
+              <p className="record-hint">
+                {state === "idle" && "Press & hold Space or click & hold the button"}
+                {state === "recording" && "Release when done speaking"}
+                {state === "transcribing" && "Processing audio…"}
+                {state === "answering" && "Streaming response…"}
+              </p>
             </div>
-            <p className="record-hint">
-              {state === "idle" && "Press & hold Space or click & hold the button"}
-              {state === "recording" && "Release when done speaking"}
-              {state === "transcribing" && "Processing audio…"}
-              {state === "answering" && "Streaming response…"}
-            </p>
-          </div>
 
-          {/* Status Indicators */}
-          <div className="pipeline-status">
-            <div className={`pipeline-step ${state === "recording" ? "active" : ""}`}>
-              <span className="step-dot"></span>
-              <span>Capture</span>
-            </div>
-            <div className="pipeline-arrow">→</div>
-            <div className={`pipeline-step ${state === "transcribing" ? "active" : ""}`}>
-              <span className="step-dot"></span>
-              <span>Transcribe</span>
-            </div>
-            <div className="pipeline-arrow">→</div>
-            <div className={`pipeline-step ${state === "answering" ? "active" : ""}`}>
-              <span className="step-dot"></span>
-              <span>Answer</span>
+            {/* Status Indicators */}
+            <div className="pipeline-status">
+              <div className={`pipeline-step ${state === "recording" ? "active" : ""}`}>
+                <span className="step-dot"></span>
+                <span>Capture</span>
+              </div>
+              <div className="pipeline-arrow">→</div>
+              <div className={`pipeline-step ${state === "transcribing" ? "active" : ""}`}>
+                <span className="step-dot"></span>
+                <span>Transcribe</span>
+              </div>
+              <div className="pipeline-arrow">→</div>
+              <div className={`pipeline-step ${state === "answering" ? "active" : ""}`}>
+                <span className="step-dot"></span>
+                <span>Answer</span>
+              </div>
             </div>
           </div>
 
@@ -353,9 +382,11 @@ export default function InterviewPage() {
           {/* Historical answers */}
           {answers.length === 0 && state !== "answering" && (
             <div className="empty-answers">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </svg>
+              <div className="empty-icon-wrapper">
+                <svg className="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+              </div>
               <p>Hold record while interviewer speaks to get AI answers</p>
             </div>
           )}

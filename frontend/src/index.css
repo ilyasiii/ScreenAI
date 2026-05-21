@@ -20,8 +20,8 @@
   --text-primary:   #f1f5f9;
   --text-secondary: #94a3b8;
   --text-tertiary:  #64748b;
-  --text-muted:     #475569;
-  --text-dim:       #64748b;
+  --text-muted:     #94a3b8;
+  --text-dim:       #8b9cb8;
 
   /* ── Accent (matching landing page) ── */
   --blue:           #3b82f6;

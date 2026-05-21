@@ -1,11 +1,11 @@
 /* ══════════════════════════════════════════════════════════════════
-   SCREEN PREVIEW — Clean Minimal Tool
+   SCREEN PREVIEW — Professional Dashboard Panel
    ══════════════════════════════════════════════════════════════════ */
 
 .screen-preview {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 0;
   height: 100%;
 }
 
@@ -14,10 +14,23 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.preview-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel-icon {
+  width: 20px;
+  height: 20px;
+  color: var(--text-secondary);
 }
 
 .preview-title {
-  font-size: 0.9rem;
+  font-size: 1rem;
   font-weight: 600;
   color: var(--text-primary);
   margin: 0;
@@ -27,18 +40,18 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
+  padding: 5px 14px;
   border-radius: var(--radius-full);
-  font-size: 0.72rem;
-  font-weight: 600;
+  font-size: 0.75rem;
+  font-weight: 500;
   background: var(--bg-surface);
   border: 1px solid var(--border-subtle);
   color: var(--text-dim);
 }
 
 .status-dot {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--text-dim);
 }
@@ -69,14 +82,15 @@
   font-size: 0.82rem;
   font-weight: 500;
   border: 1px solid var(--danger-border);
+  margin-bottom: 16px;
 }
 
-/* ── Preview Area — fills entire panel ── */
+/* ── Preview Area ── */
 .preview-area {
   flex: 1;
   min-height: 0;
-  border-radius: var(--radius-md);
-  background: #000;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.3);
   border: 1px solid var(--border-subtle);
   overflow: hidden;
   display: flex;
@@ -97,45 +111,79 @@
 /* ── Placeholder ── */
 .placeholder {
   text-align: center;
-  padding: 40px 24px;
+  padding: 48px 32px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 16px;
+}
+
+.placeholder-icon-wrapper {
+  width: 80px;
+  height: 80px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(102, 126, 234, 0.15) 0%, rgba(102, 126, 234, 0.05) 70%);
+  border: 1px solid rgba(102, 126, 234, 0.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 30px rgba(102, 126, 234, 0.2), 0 0 60px rgba(102, 126, 234, 0.08);
+  animation: iconGlow 3s ease-in-out infinite;
+}
+
+@keyframes iconGlow {
+  0%, 100% { box-shadow: 0 0 30px rgba(102, 126, 234, 0.2), 0 0 60px rgba(102, 126, 234, 0.08); }
+  50% { box-shadow: 0 0 40px rgba(102, 126, 234, 0.35), 0 0 80px rgba(102, 126, 234, 0.15); }
 }
 
 .placeholder-icon {
-  width: 48px;
-  height: 48px;
-  color: var(--text-dim);
-  opacity: 0.5;
+  width: 36px;
+  height: 36px;
+  color: #667eea;
+  filter: drop-shadow(0 0 6px rgba(102, 126, 234, 0.5));
+}
+
+.placeholder-heading {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 8px 0 0;
 }
 
 .placeholder-text {
-  font-size: 0.85rem;
+  font-size: 0.88rem;
   color: var(--text-dim);
   margin: 0;
+  max-width: 320px;
+  line-height: 1.5;
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   BUTTONS — Compact Tool Style
+   BUTTONS
    ══════════════════════════════════════════════════════════════════ */
 
 .controls {
   display: flex;
+  justify-content: center;
+  margin-top: 16px;
+}
+
+.controls-active {
+  display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  justify-content: center;
 }
 
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
-  padding: 8px 16px;
-  border-radius: var(--radius-sm);
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 10px;
   font-family: var(--font-sans);
-  font-size: 0.82rem;
+  font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -154,9 +202,25 @@
 }
 
 .btn svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
+}
+
+/* Share Button — Large Hero Style */
+.btn-share {
+  background: var(--gradient-primary);
+  color: white;
+  padding: 14px 40px;
+  border-radius: 12px;
+  font-size: 0.95rem;
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+}
+
+.btn-share:hover:not(:disabled) {
+  filter: brightness(1.1);
+  box-shadow: 0 6px 28px rgba(99, 102, 241, 0.4);
+  transform: translateY(-1px);
 }
 
 /* Primary */
@@ -181,34 +245,45 @@
 /* Outline */
 .btn-outline {
   background: transparent;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   border: 1px solid var(--border-subtle);
 }
 
 .btn-outline:hover:not(:disabled) {
   color: white;
   border-color: var(--border-hover);
-  background: rgba(255,255,255,0.04);
+  background: rgba(255,255,255,0.06);
 }
 
 /* Ghost */
 .btn-ghost {
   background: transparent;
-  color: var(--text-dim);
+  color: var(--text-secondary);
   border: none;
 }
 
 .btn-ghost:hover:not(:disabled) {
-  color: var(--danger);
-  background: var(--danger-bg);
+  color: white;
+  background: rgba(255,255,255,0.06);
+}
+
+/* Context badge */
+.ctx-badge {
+  background: var(--gradient-primary);
+  color: white;
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: var(--radius-full);
+  min-width: 18px;
+  text-align: center;
 }
 
 /* Spinner */
 .spinner {
-  display: inline-block;
   width: 14px;
   height: 14px;
-  border: 2px solid rgba(255, 255, 255, 0.2);
+  border: 2px solid rgba(255,255,255,0.3);
   border-top-color: white;
   border-radius: 50%;
   animation: spin 0.6s linear infinite;
@@ -218,17 +293,4 @@
   to { transform: rotate(360deg); }
 }
 
-/* Context Badge */
-.ctx-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: var(--radius-full);
-  background: var(--blue);
-  color: white;
-  font-size: 0.68rem;
-  font-weight: 700;
-}
+
