@@ -1240,7 +1240,7 @@
 }
 
 /* ══════════════════════════════════════════════════════════════════
-   CTA / DEMO FORM SECTION
+   CTA SECTION
    ══════════════════════════════════════════════════════════════════ */
 
 .cta-section {
@@ -1277,102 +1277,18 @@
   margin: 0 auto 36px;
 }
 
-.demo-form {
-  background: var(--landing-card);
-  border: 1px solid var(--landing-border);
-  border-radius: var(--radius-xl);
-  padding: 36px 32px;
-  text-align: left;
-}
-
-.demo-form h3 {
-  font-size: 1.1rem;
-  font-weight: 600;
-  color: white;
-  margin: 0 0 24px;
-  text-align: center;
-}
-
-.form-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 14px;
-}
-
-.form-group {
+.cta-actions {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-bottom: 16px;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  flex-wrap: wrap;
 }
 
-.form-group.full {
-  grid-column: 1 / -1;
-}
-
-.form-group label {
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.form-group input,
-.form-group select,
-.form-group textarea {
-  padding: 11px 16px;
-  background: var(--landing-bg);
-  border: 1px solid var(--landing-border);
-  border-radius: var(--radius-sm);
-  color: var(--text-white);
-  font-family: inherit;
-  font-size: 0.88rem;
-  outline: none;
-  transition: all 0.2s;
-}
-
-.form-group input:focus,
-.form-group select:focus,
-.form-group textarea:focus {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 3px rgba(59,130,246,0.15);
-}
-
-.form-group input::placeholder,
-.form-group textarea::placeholder {
+.cta-note {
+  font-size: 0.82rem;
   color: var(--text-dim);
-}
-
-.form-group select {
-  cursor: pointer;
-  appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg width='12' height='8' viewBox='0 0 12 8' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 14px center;
-  padding-right: 36px;
-}
-
-.form-group select option {
-  background: var(--landing-card);
-  color: var(--text-light);
-}
-
-.form-group textarea {
-  resize: vertical;
-  min-height: 80px;
-}
-
-.demo-form .btn-landing {
-  width: 100%;
-  margin-top: 8px;
-}
-
-.form-note {
-  text-align: center;
-  font-size: 0.75rem;
-  color: var(--text-dim);
-  margin-top: 14px;
+  margin-top: 20px;
 }
 
 /* ══════════════════════════════════════════════════════════════════

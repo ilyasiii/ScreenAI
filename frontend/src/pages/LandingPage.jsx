@@ -85,19 +85,6 @@ const Icons = {
 export default function LandingPage() {
   const [annualBilling, setAnnualBilling] = useState(true);
   const [openFaq, setOpenFaq] = useState(0);
-  const [formData, setFormData] = useState({
-    firstName: "", lastName: "", email: "", company: "", teamSize: "", message: "",
-  });
-
-  const handleFormChange = (e) => {
-    setFormData((prev) => ({ ...prev, [e.target.name]: e.target.value }));
-  };
-
-  const handleFormSubmit = (e) => {
-    e.preventDefault();
-    alert("Demo request submitted! We'll be in touch.");
-    setFormData({ firstName: "", lastName: "", email: "", company: "", teamSize: "", message: "" });
-  };
 
   return (
     <div className="landing">
@@ -132,9 +119,9 @@ export default function LandingPage() {
 
           <div className="nav-actions">
             <Link to="/auth" className="btn-ghost">Log in</Link>
-            <a href="#contact" className="btn-landing btn-primary-landing">
-              Book a Demo
-            </a>
+            <Link to="/auth" className="btn-landing btn-primary-landing">
+              Get Started Free
+            </Link>
           </div>
 
           <button className="nav-hamburger">{Icons.menu}</button>
@@ -161,9 +148,9 @@ export default function LandingPage() {
           </p>
 
           <div className="hero-actions">
-            <a href="#contact" className="btn-landing btn-primary-landing btn-large-landing">
-              Book a Demo {Icons.arrowRight}
-            </a>
+            <Link to="/auth" className="btn-landing btn-primary-landing btn-large-landing">
+              Get Started Free {Icons.arrowRight}
+            </Link>
             <Link to="/auth" className="btn-landing btn-secondary-landing btn-large-landing">
               Try Free {Icons.play}
             </Link>
@@ -399,9 +386,9 @@ export default function LandingPage() {
                 <li>{Icons.check} SSO & SAML</li>
                 <li>{Icons.check} Dedicated support</li>
               </ul>
-              <a href="#contact" className="btn-landing btn-secondary-landing">
+              <Link to="/auth" className="btn-landing btn-secondary-landing">
                 Contact Sales
-              </a>
+              </Link>
             </div>
           </div>
         </div>
@@ -509,58 +496,24 @@ export default function LandingPage() {
         </div>
       </section>
 
-      {/* ════════ CTA / DEMO FORM ════════ */}
+      {/* ════════ CTA ════════ */}
       <section className="cta-section" id="contact">
         <div className="landing-container">
           <div className="cta-inner">
             <div className="section-label">Get Started</div>
             <h2 className="section-title">Ready to solve problems 10x faster?</h2>
             <p className="section-subtitle">
-              Book a demo or start your free trial today. No credit card required.
+              Join thousands of developers and students using ScreenAI to get instant answers. No credit card required.
             </p>
-
-            <form className="demo-form" onSubmit={handleFormSubmit}>
-              <h3>Book a Demo</h3>
-              <div className="form-row">
-                <div className="form-group">
-                  <label htmlFor="firstName">First Name</label>
-                  <input type="text" id="firstName" name="firstName" placeholder="John" value={formData.firstName} onChange={handleFormChange} required />
-                </div>
-                <div className="form-group">
-                  <label htmlFor="lastName">Last Name</label>
-                  <input type="text" id="lastName" name="lastName" placeholder="Doe" value={formData.lastName} onChange={handleFormChange} required />
-                </div>
-              </div>
-              <div className="form-group">
-                <label htmlFor="email">Work Email</label>
-                <input type="email" id="email" name="email" placeholder="john@company.com" value={formData.email} onChange={handleFormChange} required />
-              </div>
-              <div className="form-row">
-                <div className="form-group">
-                  <label htmlFor="company">Company</label>
-                  <input type="text" id="company" name="company" placeholder="Acme Inc." value={formData.company} onChange={handleFormChange} />
-                </div>
-                <div className="form-group">
-                  <label htmlFor="teamSize">Team Size</label>
-                  <select id="teamSize" name="teamSize" value={formData.teamSize} onChange={handleFormChange}>
-                    <option value="">Select...</option>
-                    <option value="1-5">1–5</option>
-                    <option value="6-20">6–20</option>
-                    <option value="21-50">21–50</option>
-                    <option value="51-200">51–200</option>
-                    <option value="200+">200+</option>
-                  </select>
-                </div>
-              </div>
-              <div className="form-group full">
-                <label htmlFor="message">Message (optional)</label>
-                <textarea id="message" name="message" placeholder="Tell us about your use case..." value={formData.message} onChange={handleFormChange} rows={3} />
-              </div>
-              <button type="submit" className="btn-landing btn-primary-landing btn-large-landing">
-                Submit Demo Request {Icons.arrowRight}
-              </button>
-              <p className="form-note">We'll get back to you within 24 hours</p>
-            </form>
+            <div className="cta-actions">
+              <Link to="/auth" className="btn-landing btn-primary-landing btn-large-landing">
+                Start Free Today {Icons.arrowRight}
+              </Link>
+              <Link to="/auth" className="btn-landing btn-secondary-landing btn-large-landing">
+                Sign Up {Icons.play}
+              </Link>
+            </div>
+            <p className="cta-note">Free tier includes 20 analyses per day · No credit card needed</p>
           </div>
         </div>
       </section>
