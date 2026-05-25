@@ -35,9 +35,6 @@ function App() {
   const [contextCount, setContextCount] = useState(0);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [answers, setAnswers] = useState([]);
-  const [backendStatus, setBackendStatus] = useState(null);
-  const [statusMessage, setStatusMessage] = useState("");
-  const [modelName, setModelName] = useState("");
   const [todayUsage, setTodayUsage] = useState(0);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
@@ -68,15 +65,7 @@ function App() {
     async function init() {
       try {
         const health = await checkHealth();
-        if (!health.openai_configured) {
-          setBackendStatus("error");
-          setStatusMessage(
-            "⚠️ OpenAI API key not configured. Edit backend/.env and set your OPENAI_API_KEY."
-          );
-          return;
-        }
-        setBackendStatus("ok");
-        setModelName(health.model);
+        if (!health.openai_configured) return;
 
         const sid = await createSession();
         setSessionId(sid);
@@ -85,10 +74,7 @@ function App() {
           getTodayUsage(user.id).then(setTodayUsage);
         }
       } catch (err) {
-        setBackendStatus("error");
-        setStatusMessage(
-          "❌ Cannot connect to backend. Make sure the FastAPI server is running on port 8000."
-        );
+        console.error("Backend connection failed:", err);
       }
     }
     init();
@@ -120,10 +106,8 @@ function App() {
     try {
       const result = await addScreenshot(sessionId, frame);
       setContextCount(result.context_count);
-      setStatusMessage(`📸 Screenshot added to context (${result.context_count} total)`);
     } catch (err) {
       console.error("Failed to add screenshot:", err);
-      setStatusMessage("❌ Failed to add screenshot to context");
     }
   }, [sessionId, captureFrame]);
 
@@ -133,11 +117,9 @@ function App() {
       if (!sessionId || isAnalyzing) return;
 
       setIsAnalyzing(true);
-      setStatusMessage("🔍 Analyzing screen...");
 
       const frame = captureFrame();
       if (!frame) {
-        setStatusMessage("❌ Could not capture screen frame");
         setIsAnalyzing(false);
         return;
       }
@@ -173,7 +155,6 @@ function App() {
             updated[0] = { ...liveAnswer };
             return updated;
           });
-          setStatusMessage("✅ Analysis complete");
           setIsAnalyzing(false);
 
           // Save to Supabase (fire-and-forget)
@@ -192,7 +173,6 @@ function App() {
             updated[0] = { ...liveAnswer };
             return updated;
           });
-          setStatusMessage(`❌ ${errMsg}`);
           setIsAnalyzing(false);
         },
         profile
@@ -207,7 +187,7 @@ function App() {
     try {
       await clearContext(sessionId);
       setContextCount(0);
-      setStatusMessage("� Screenshots cleared  •  conversation kept");
+
     } catch (err) {
       console.error("Failed to clear context:", err);
     }

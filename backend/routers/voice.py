@@ -23,7 +23,7 @@ import queue
 import asyncio
 import logging
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import JSONResponse
 
 from services.audio_capture import AudioCapture
