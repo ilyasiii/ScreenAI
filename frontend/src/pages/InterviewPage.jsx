@@ -3,14 +3,20 @@
  * Real-time audio capture, transcription, and AI-powered answer streaming.
  */
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import ReactMarkdown from "react-markdown";
-import { useAuth } from "../contexts/AuthContext";
-import { useProfile } from "../contexts/ProfileContext";
+import { useAuth } from "../contexts/auth-context";
+import { useProfile } from "../contexts/profile-context";
+import ApiKeyModal from "../components/ApiKeyModal";
 import ProfileModal from "../components/ProfileModal";
+import { clearCredentials, loadCredentials } from "../services/credentials";
+import { WS_URL } from "../config";
 import "./InterviewPage.css";
 
-const WS_URL = "ws://localhost:8000/ws/voice";
+const MAX_RECONNECT_ATTEMPTS = 6;
+
+let answerSeq = 0;
+const nextAnswerId = () => `v${Date.now().toString(36)}-${answerSeq++}`;
 
 export default function InterviewPage() {
   const { user, signOut } = useAuth();
@@ -24,6 +30,8 @@ export default function InterviewPage() {
   const [recordingTime, setRecordingTime] = useState(0);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  // Non-null while the key prompt is open: { needed: string[], error?: string }.
+  const [keyPrompt, setKeyPrompt] = useState(null);
 
   // ─── Close user menu on click outside ──────────────────────────────
   useEffect(() => {
@@ -35,15 +43,57 @@ export default function InterviewPage() {
     return () => document.removeEventListener("click", handleClick);
   }, [showUserMenu]);
 
+  const navigate = useNavigate();
   const wsRef = useRef(null);
+  const reinitRef = useRef(null);
+  const connectedRef = useRef(false);
   const timerRef = useRef(null);
   const answerRef = useRef("");
   const transcriptRef = useRef("");
+  // Tokens arrive faster than the browser can usefully repaint, and every
+  // repaint re-parses the whole markdown answer. Buffer into the ref, flush to
+  // state once per animation frame.
+  const frameRef = useRef(0);
+  // Which keys the server said it needs, kept so the socket can be
+  // re-initialised after the user enters one.
+  const needsRef = useRef(null);
+
+  const flushAnswer = useCallback(() => {
+    frameRef.current = 0;
+    setAnswer(answerRef.current);
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (frameRef.current) return;
+    frameRef.current = requestAnimationFrame(flushAnswer);
+  }, [flushAnswer]);
+
+  const cancelFlush = useCallback(() => {
+    if (frameRef.current) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = 0;
+    }
+  }, []);
 
   // ─── WebSocket connection ────────────────────────────────────────────
   useEffect(() => {
     let ws = null;
     let cancelled = false;
+    let attempt = 0;
+    let timer = null;
+    // Registered so the key prompt can re-run the handshake on the live socket.
+    reinitRef.current = () => {
+      if (ws?.readyState !== WebSocket.OPEN) return;
+      const info = needsRef.current || {};
+      const stored = loadCredentials();
+      const credentials = {};
+      if (info.needs_groq_key) credentials.groq_key = stored.groq_key || "";
+      if (info.needs_llm_key) {
+        const field = `${info.llm_provider}_key`;
+        credentials[field] = stored[field] || "";
+      }
+      ws.send(JSON.stringify({ action: "init", credentials }));
+    };
 
     const connect = () => {
       ws = new WebSocket(WS_URL);
@@ -51,8 +101,10 @@ export default function InterviewPage() {
 
       ws.onopen = () => {
         if (cancelled) { ws.close(); return; }
-        setConnected(true);
+        attempt = 0;
         setError("");
+        // Not "connected" yet: the pipeline only exists after `init` is
+        // accepted, and the record button must stay disabled until then.
       };
 
       ws.onmessage = (event) => {
@@ -60,7 +112,25 @@ export default function InterviewPage() {
         const msg = JSON.parse(event.data);
 
         switch (msg.type) {
+          case "ready": {
+            // The server has told us which credentials it cannot supply. Send
+            // whatever we hold; it will ask again if something is missing.
+            needsRef.current = msg;
+            const stored = loadCredentials();
+            const credentials = {};
+            if (msg.needs_groq_key) credentials.groq_key = stored.groq_key || "";
+            if (msg.needs_llm_key) {
+              const field = `${msg.llm_provider}_key`;
+              credentials[field] = stored[field] || "";
+            }
+            ws.send(JSON.stringify({ action: "init", credentials }));
+            break;
+          }
           case "status":
+            if (!connectedRef.current) {
+              connectedRef.current = true;
+              setConnected(true);
+            }
             setState(msg.state);
             if (msg.state === "transcribing") {
               setAnswer("");
@@ -73,14 +143,20 @@ export default function InterviewPage() {
             break;
           case "token":
             answerRef.current += msg.text;
-            setAnswer(answerRef.current);
+            scheduleFlush();
             break;
           case "done": {
+            cancelFlush();
             const finalAnswer = answerRef.current;
             const finalQuestion = transcriptRef.current;
-            if (finalAnswer) {
+            if (finalAnswer.trim()) {
               setAnswers((prev) => [
-                { question: finalQuestion, answer: finalAnswer, timestamp: new Date().toLocaleTimeString() },
+                {
+                  id: nextAnswerId(),
+                  question: finalQuestion,
+                  answer: finalAnswer,
+                  timestamp: new Date().toLocaleTimeString(),
+                },
                 ...prev,
               ]);
             }
@@ -90,6 +166,19 @@ export default function InterviewPage() {
             break;
           }
           case "error":
+            if (msg.code === "api_key_required") {
+              // Recoverable: prompt, then re-send `init` with what we get.
+              const needed = [];
+              const info = needsRef.current || {};
+              if (info.needs_groq_key) needed.push("groq_key");
+              if (info.needs_llm_key) needed.push(`${info.llm_provider}_key`);
+              setKeyPrompt({
+                needed: needed.length ? [...new Set(needed)] : ["groq_key"],
+                error: msg.message,
+              });
+              setState("idle");
+              break;
+            }
             setError(msg.message);
             setState("idle");
             break;
@@ -97,48 +186,66 @@ export default function InterviewPage() {
       };
 
       ws.onclose = () => {
-        if (!cancelled) setConnected(false);
+        if (cancelled) return;
+        connectedRef.current = false;
+        setConnected(false);
+        setState("idle");
+        // Retry with backoff. A dropped socket used to leave the page
+        // permanently dead with no way back short of a reload.
+        attempt += 1;
+        if (attempt <= MAX_RECONNECT_ATTEMPTS) {
+          const delay = Math.min(1000 * 2 ** (attempt - 1), 10000);
+          setError(`Connection lost. Reconnecting in ${Math.round(delay / 1000)}s…`);
+          timer = setTimeout(connect, delay);
+        } else {
+          setError("Cannot reach the backend. Check that it is running, then reload.");
+        }
       };
 
       ws.onerror = () => {
-        if (!cancelled) {
-          setConnected(false);
-          setError("WebSocket connection failed. Make sure the backend is running.");
-        }
+        // onerror always precedes onclose; let onclose own the retry so a
+        // single failure does not schedule two reconnects.
+        if (!cancelled) setConnected(false);
       };
     };
 
-    // Small delay to survive React StrictMode double-mount
-    const timer = setTimeout(connect, 100);
+    // Small delay to survive React StrictMode's double mount.
+    timer = setTimeout(connect, 100);
 
     return () => {
       cancelled = true;
       clearTimeout(timer);
-      if (ws) ws.close();
+      cancelFlush();
+      if (ws) {
+        // Drop the handler first: closing here must not trigger a reconnect.
+        ws.onclose = null;
+        ws.close();
+      }
     };
-  }, []);
+  }, [scheduleFlush, cancelFlush]);
 
   // ─── Recording timer ─────────────────────────────────────────────────
   useEffect(() => {
-    if (state === "recording") {
-      setRecordingTime(0);
-      timerRef.current = setInterval(() => {
-        setRecordingTime((t) => t + 0.1);
-      }, 100);
-    } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    }
+    if (state !== "recording") return undefined;
+
+    // Elapsed time is measured against a start stamp rather than accumulated
+    // in 0.1 increments, which drifts as soon as the tab is throttled. The
+    // counter is reset in startRecording, so nothing sets state in this body.
+    const started = performance.now();
+    timerRef.current = setInterval(() => {
+      setRecordingTime((performance.now() - started) / 1000);
+    }, 100);
+
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     };
   }, [state]);
 
   // ─── Actions ─────────────────────────────────────────────────────────
   const startRecording = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
+      setRecordingTime(0);
       wsRef.current.send(JSON.stringify({ action: "start_recording" }));
     }
   }, []);
@@ -261,7 +368,15 @@ export default function InterviewPage() {
               </div>
               {showUserMenu && (
                 <div className="user-dropdown">
-                  <button className="dropdown-item" onClick={signOut}>
+                  <button
+                    className="dropdown-item"
+                    onClick={async () => {
+                      setShowUserMenu(false);
+                      clearCredentials();
+                      await signOut();
+                      navigate("/");
+                    }}
+                  >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                     Sign out
                   </button>
@@ -392,7 +507,7 @@ export default function InterviewPage() {
           )}
 
           {answers.map((item, index) => (
-            <div key={index} className="answer-card">
+            <div key={item.id} className="answer-card">
               <div className="answer-meta">
                 <span className="answer-number">#{answers.length - index}</span>
                 <span className="answer-time">{item.timestamp}</span>
@@ -411,6 +526,19 @@ export default function InterviewPage() {
       </main>
 
       {showProfileModal && <ProfileModal onClose={() => setShowProfileModal(false)} />}
+
+      {keyPrompt && (
+        <ApiKeyModal
+          needed={keyPrompt.needed}
+          error={keyPrompt.error}
+          onSaved={() => {
+            setKeyPrompt(null);
+            setError("");
+            reinitRef.current?.();
+          }}
+          onCancel={() => setKeyPrompt(null)}
+        />
+      )}
     </div>
   );
 }

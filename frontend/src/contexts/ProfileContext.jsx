@@ -1,6 +1,6 @@
-import { createContext, useContext, useState, useCallback } from "react";
+import { useCallback, useState } from "react";
 
-const ProfileContext = createContext(null);
+import { ProfileContext } from "./profile-context";
 
 const STORAGE_KEY = "screenai_profile";
 
@@ -44,10 +44,4 @@ export function ProfileProvider({ children }) {
       {children}
     </ProfileContext.Provider>
   );
-}
-
-export function useProfile() {
-  const context = useContext(ProfileContext);
-  if (!context) throw new Error("useProfile must be used within ProfileProvider");
-  return context;
 }

@@ -1,41 +1,43 @@
 """
-Audio Capture Service — WASAPI Loopback
-Captures system audio (what's playing through speakers/headphones).
-Adapted for use within FastAPI backend.
+System audio capture via WASAPI loopback - records what is playing through the
+speakers, which is how the interviewer's side of the call is heard.
+
+Windows only: PyAudioWPatch is the Windows-specific PortAudio fork that exposes
+loopback devices.
 """
 
-import time
-import threading
-import queue
 import logging
-import numpy as np
+import queue
+import threading
+import time
 
+import numpy as np
 import pyaudiowpatch as pyaudio
 
 logger = logging.getLogger(__name__)
 
 LOOPBACK_CHUNK_MS = 30
+MAX_OPEN_RETRIES = 3
 
 
 class AudioCapture:
-    """
-    Captures system audio via WASAPI loopback.
-    Runs in its own daemon thread.
-    Produces raw numpy chunks onto raw_queue.
-    """
+    """Produces raw numpy chunks onto raw_queue from its own daemon thread."""
 
-    def __init__(self, raw_queue: queue.Queue):
+    def __init__(self, raw_queue: queue.Queue, on_error_cb=None):
         self.raw_queue = raw_queue
+        # Without this, a failure to open the device left the capture thread
+        # dead and the UI waiting on audio that would never arrive.
+        self.on_error_cb = on_error_cb
         self._stop_event = threading.Event()
-        self._thread = None
+        self._thread: threading.Thread | None = None
         self._pa = None
         self._stream = None
+        self._dropped = 0
 
     def start(self):
         self._stop_event.clear()
-        self._thread = threading.Thread(
-            target=self._run, name="Thread-Capture", daemon=True
-        )
+        self._dropped = 0
+        self._thread = threading.Thread(target=self._run, name="Thread-Capture", daemon=True)
         self._thread.start()
         logger.info("AudioCapture thread started.")
 
@@ -45,59 +47,63 @@ class AudioCapture:
             try:
                 self._stream.stop_stream()
                 self._stream.close()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         if self._pa:
             try:
                 self._pa.terminate()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         self._pa = None
         self._stream = None
+        if self._dropped:
+            logger.warning("Dropped %d chunk(s) - the processing thread fell behind.", self._dropped)
         logger.info("AudioCapture stopped.")
 
+    def _fail(self, message: str):
+        logger.error(message)
+        if self.on_error_cb:
+            self.on_error_cb(message)
+
     def _get_loopback_device(self):
-        """Return the WASAPI loopback device info for the default output."""
-        # PyAudioWPatch provides a dedicated method for getting loopback devices
+        """WASAPI loopback device for the default output."""
         try:
-            # Use the built-in method to get loopback device for default speakers
             default_speakers = self._pa.get_default_wasapi_loopback()
             if default_speakers:
                 return default_speakers
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             logger.warning("get_default_wasapi_loopback failed: %s", exc)
 
-        # Fallback: manually search
         wasapi_info = self._pa.get_host_api_info_by_type(pyaudio.paWASAPI)
-        default_out_idx = wasapi_info["defaultOutputDevice"]
-        device_info = self._pa.get_device_info_by_index(default_out_idx)
+        device_info = self._pa.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
+        if device_info.get("isLoopbackDevice", False):
+            return device_info
 
-        if not device_info.get("isLoopbackDevice", False):
-            for i in range(self._pa.get_device_count()):
-                d = self._pa.get_device_info_by_index(i)
-                if d.get("isLoopbackDevice", False) and d["name"].startswith(
-                    device_info["name"][:20]
-                ):
-                    return d
-            # Fallback: try any loopback device
-            for i in range(self._pa.get_device_count()):
-                d = self._pa.get_device_info_by_index(i)
-                if d.get("isLoopbackDevice", False):
-                    logger.info("Using fallback loopback device: %s", d["name"])
-                    return d
-            raise RuntimeError(
-                "Could not find a WASAPI loopback device. "
-                "Make sure your headphones/speakers are set as the default playback device."
-            )
-        return device_info
+        name_prefix = device_info["name"][:20]
+        candidates = [
+            self._pa.get_device_info_by_index(i) for i in range(self._pa.get_device_count())
+        ]
+        loopbacks = [d for d in candidates if d.get("isLoopbackDevice", False)]
+
+        for device in loopbacks:
+            if device["name"].startswith(name_prefix):
+                return device
+        if loopbacks:
+            logger.info("Using fallback loopback device: %s", loopbacks[0]["name"])
+            return loopbacks[0]
+
+        raise RuntimeError(
+            "No WASAPI loopback device found. Set your headphones or speakers as the "
+            "default playback device and reconnect."
+        )
 
     def _run(self):
         self._pa = pyaudio.PyAudio()
 
         try:
             device_info = self._get_loopback_device()
-        except RuntimeError as exc:
-            logger.error(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self._fail(str(exc))
             return
 
         sample_rate = int(device_info["defaultSampleRate"])
@@ -106,24 +112,25 @@ class AudioCapture:
 
         logger.info(
             "Loopback device: %s | %d Hz | %d ch | chunk=%d samples",
-            device_info["name"], sample_rate, channels, chunk_size,
+            device_info["name"],
+            sample_rate,
+            channels,
+            chunk_size,
         )
 
         def _callback(in_data, frame_count, time_info, status):
             if self._stop_event.is_set():
                 return (None, pyaudio.paAbort)
             try:
-                # Convert from int16 to float32 normalized
                 chunk = np.frombuffer(in_data, dtype=np.int16).astype(np.float32) / 32768.0
-                if not self.raw_queue.full():
-                    self.raw_queue.put_nowait((chunk, sample_rate, channels))
-            except Exception as exc:
+                self.raw_queue.put_nowait((chunk, sample_rate, channels))
+            except queue.Full:
+                self._dropped += 1
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("Capture callback error: %s", exc)
             return (None, pyaudio.paContinue)
 
-        # Retry opening the stream a few times (WASAPI can be finicky)
-        max_retries = 3
-        for attempt in range(max_retries):
+        for attempt in range(1, MAX_OPEN_RETRIES + 1):
             try:
                 self._stream = self._pa.open(
                     format=pyaudio.paInt16,
@@ -138,16 +145,17 @@ class AudioCapture:
             except OSError as exc:
                 logger.warning(
                     "Failed to open loopback stream (attempt %d/%d): %s",
-                    attempt + 1, max_retries, exc,
+                    attempt,
+                    MAX_OPEN_RETRIES,
+                    exc,
                 )
-                if attempt < max_retries - 1:
-                    time.sleep(1.0)
-                else:
-                    logger.error(
-                        "Could not open WASAPI loopback stream after %d attempts. "
-                        "Audio capture unavailable.", max_retries
+                if attempt == MAX_OPEN_RETRIES:
+                    self._fail(
+                        "Could not open the system audio stream. Another application may have "
+                        "exclusive control of the playback device."
                     )
                     return
+                time.sleep(1.0)
 
         self._stream.start_stream()
         logger.info("Loopback stream active.")

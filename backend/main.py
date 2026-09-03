@@ -1,74 +1,105 @@
 """
-Screen Reader AI - Backend Server
-FastAPI backend that receives screenshots, maintains context,
-and uses OpenAI GPT-4.1 Vision to analyze and answer questions.
+ScreenAI backend.
+
+Screenshot analysis over SSE, and a WebSocket voice pipeline. All tunables
+live in config.py.
 """
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-from pathlib import Path
-from contextlib import asynccontextmanager
-import asyncio
-import os
 
-# Load .env from the backend directory regardless of cwd
-_env_path = Path(__file__).resolve().parent / ".env"
-load_dotenv(_env_path)
+from config import settings
 
-from routers import analyze
-from routers import voice
-from services.context_manager import context_manager
+logging.basicConfig(
+    level=getattr(logging, settings.log_level, logging.INFO),
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("screenai")
+
+from routers import analyze, voice  # noqa: E402 - must follow load_dotenv in config
+from services.context_manager import context_manager  # noqa: E402
+from services.credentials import credential_status  # noqa: E402
 
 
 async def _cleanup_loop():
-    """Background task: remove idle sessions every hour to free memory."""
+    """Evict idle sessions so a long-running process does not accumulate
+    screenshots for browsers that closed hours ago."""
     while True:
-        await asyncio.sleep(3600)
-        removed = context_manager.cleanup_old_sessions()
-        if removed:
-            print(f"[cleanup] Removed {removed} idle session(s)")
+        await asyncio.sleep(600)
+        try:
+            removed = context_manager.cleanup_old_sessions()
+            if removed:
+                logger.info("Removed %d idle session(s).", removed)
+        except Exception:  # noqa: BLE001 - never let the janitor kill itself
+            logger.exception("Session cleanup failed.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(_cleanup_loop())
-    yield
+    if not settings.vision_configured:
+        if settings.allow_client_keys:
+            logger.info(
+                "OPENAI_API_KEY is not set - users will be asked for their own key "
+                "in the browser."
+            )
+        else:
+            logger.warning(
+                "OPENAI_API_KEY is not set and ALLOW_CLIENT_API_KEYS is off - "
+                "screenshot analysis cannot work."
+            )
+
+    # Held on app.state: asyncio only keeps a weak reference to running tasks,
+    # so a bare create_task() can be garbage-collected mid-flight.
+    app.state.cleanup_task = asyncio.create_task(_cleanup_loop())
+    try:
+        yield
+    finally:
+        app.state.cleanup_task.cancel()
+        try:
+            await app.state.cleanup_task
+        except asyncio.CancelledError:
+            pass
 
 
 app = FastAPI(
-    title="Screen Reader AI",
-    description="AI-powered screen reading and question answering",
-    version="1.0.0",
+    title="ScreenAI",
+    description="Screen reading and question answering",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# CORS configuration
-origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# Include routers
 app.include_router(analyze.router, prefix="/api")
 app.include_router(voice.router)
 
 
 @app.get("/")
 async def root():
-    return {"message": "Screen Reader AI Backend is running", "version": "1.0.0"}
+    return {"message": "ScreenAI backend is running", "version": app.version}
 
 
 @app.get("/health")
 async def health():
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    has_key = bool(api_key and api_key != "sk-your-api-key-here")
+    """Configuration the browser needs to decide whether to prompt for a key.
+
+    Reports only whether each key is present, never any part of its value.
+    """
     return {
         "status": "healthy",
-        "openai_configured": has_key,
-        "model": os.getenv("OPENAI_MODEL", "gpt-4.1"),
+        "model": settings.vision_model,
+        "voice_provider": settings.llm_provider,
+        "active_sessions": context_manager.session_count(),
+        **credential_status(),
     }

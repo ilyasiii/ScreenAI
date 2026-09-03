@@ -1,16 +1,52 @@
-fastapi>=0.115.0
-uvicorn>=0.30.6
-python-multipart>=0.0.9
-openai>=1.51.0
-python-dotenv>=1.0.1
-pydantic>=2.11.0
-Pillow>=11.0.0
-websockets>=12.0
-PyAudioWPatch>=0.2.12.5
-numpy
-scipy
-torch
-torchaudio
-silero-vad
-groq
-PyPDF2
+# Python 3.10+. Windows only (PyAudioWPatch).
+#
+# Ranges, not exact pins. Several of these ship compiled extensions
+# (pydantic-core, numpy, scipy, Pillow, torch), and a wheel only exists for the
+# Python versions that were current when it was released. Pinning such a package
+# exactly means that on a newer Python pip finds no wheel, falls back to
+# building from source, and fails on a missing Rust or C++ toolchain. Bounds
+# below let pip choose a build that exists for your interpreter.
+#
+# For byte-identical installs across machines, generate a lock file from this
+# and install that instead:
+#
+#   pip install -r requirements.txt
+#   pip freeze > requirements.lock.txt      # commit this
+#   pip install -r requirements.lock.txt    # on other machines
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+python-multipart>=0.0.9,<1
+pydantic>=2.9,<3
+python-dotenv>=1.0,<2
+
+# Vision + voice LLM
+openai>=1.51,<4
+groq>=0.15,<2
+# LLM_PROVIDER=anthropic additionally needs:  pip install anthropic
+
+# Image pipeline
+Pillow>=11,<13
+
+# CV / job-description extraction (pypdf supersedes the archived PyPDF2)
+pypdf>=5.1,<7
+
+# Voice: system audio capture. Windows only - this single line is why the
+# whole file fails to install on macOS and Linux.
+PyAudioWPatch>=0.2.12.5,<0.3
+
+# Voice: resampling and voice-activity detection.
+#
+# torch here only ever runs Silero VAD, a sub-megabyte model, on the CPU. If pip
+# resolves a CUDA build on your platform, install the CPU wheels first and the
+# download shrinks by roughly an order of magnitude:
+#
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+numpy>=1.26,<3
+scipy>=1.11,<2
+torch>=2.2,<3
+torchaudio>=2.2,<3
+silero-vad>=5.1,<6
+
+# Tests (python -m pytest)
+pytest>=8.0,<10

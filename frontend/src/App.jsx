@@ -1,45 +1,58 @@
 /**
- * Screen Reader AI - Main App
- * 
- * A screen-reading AI assistant that captures your screen,
- * maintains context across multiple screenshots, and uses
- * GPT-4.1 Vision to answer any questions visible on screen.
+ * ScreenAI — screen analysis workspace.
+ *
+ * Streaming note: tokens arrive faster than the browser can usefully paint, and
+ * every re-render re-parses the whole markdown answer. So tokens accumulate in
+ * a ref and are flushed to state once per animation frame. Each answer also
+ * carries a stable id, which lets the answer cards memoise — without it, a
+ * prepended answer shifts every index and React re-renders the entire history
+ * on every single token.
  */
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useAuth } from "./contexts/AuthContext";
-import { useProfile } from "./contexts/ProfileContext";
+
+import AnswerPanel from "./components/AnswerPanel";
+import ApiKeyModal from "./components/ApiKeyModal";
+import ProfileModal from "./components/ProfileModal";
+import QuestionInput from "./components/QuestionInput";
+import ScreenPreview from "./components/ScreenPreview";
+import { useAuth } from "./contexts/auth-context";
+import { useProfile } from "./contexts/profile-context";
 import { useScreenCapture } from "./hooks/useScreenCapture";
 import {
-  createSession,
   addScreenshot,
   analyzeScreenStream,
-  clearContext,
   checkHealth,
+  clearContext,
+  createSession,
 } from "./services/api";
-import { saveAnalysis, trackUsage, getTodayUsage } from "./services/supabaseService";
-import ScreenPreview from "./components/ScreenPreview";
-import AnswerPanel from "./components/AnswerPanel";
-import QuestionInput from "./components/QuestionInput";
-import ProfileModal from "./components/ProfileModal";
+import { clearCredentials, getOpenAIKey } from "./services/credentials";
+import { getTodayUsage, saveAnalysis, trackUsage } from "./services/supabaseService";
 import "./App.css";
 
+let answerSeq = 0;
+const nextAnswerId = () => `a${Date.now().toString(36)}-${answerSeq++}`;
+
 function App() {
-  // Auth
   const { user, signOut } = useAuth();
   const { profile } = useProfile();
+  const userId = user?.id;
   const navigate = useNavigate();
 
-  // Session state
   const [sessionId, setSessionId] = useState(null);
   const [contextCount, setContextCount] = useState(0);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [answers, setAnswers] = useState([]);
   const [todayUsage, setTodayUsage] = useState(0);
+  const [backendError, setBackendError] = useState(null);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
 
-  // Screen capture hook
+  // What the backend told us at /health about its own credentials.
+  const [backendKeys, setBackendKeys] = useState(null);
+  // Non-null while the key prompt is open: { needed: string[], error?: string }.
+  const [keyPrompt, setKeyPrompt] = useState(null);
+
   const {
     isSharing,
     error: captureError,
@@ -50,7 +63,56 @@ function App() {
     canvasRef,
   } = useScreenCapture();
 
-  // ─── Close user menu on click outside ────────────────────────────────
+  // ─── Streaming plumbing ──────────────────────────────────────────────
+  const abortRef = useRef(null);
+  const bufferRef = useRef("");
+  const activeIdRef = useRef(null);
+  const frameRef = useRef(0);
+  const sessionIdRef = useRef(null);
+  const initRef = useRef(false);
+  // The question to replay once the user has entered a key.
+  const pendingQuestionRef = useRef(null);
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  const flush = useCallback(() => {
+    frameRef.current = 0;
+    const id = activeIdRef.current;
+    if (!id) return;
+    const text = bufferRef.current;
+    setAnswers((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, answer: text } : item))
+    );
+  }, []);
+
+  const scheduleFlush = useCallback(() => {
+    if (frameRef.current) return;
+    frameRef.current = requestAnimationFrame(flush);
+  }, [flush]);
+
+  const endStream = useCallback(() => {
+    if (frameRef.current) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = 0;
+    }
+    abortRef.current = null;
+    activeIdRef.current = null;
+    setIsAnalyzing(false);
+  }, []);
+
+  // Abort any in-flight stream on unmount, so navigating away mid-answer does
+  // not leave a fetch running and calling setState into a dead component.
+  useEffect(
+    () => () => {
+      abortRef.current?.();
+      if (frameRef.current) cancelAnimationFrame(frameRef.current);
+    },
+    []
+  );
+
+  // ─── Close the user menu on an outside click ─────────────────────────
   useEffect(() => {
     if (!showUserMenu) return;
     const handleClick = (e) => {
@@ -60,145 +122,217 @@ function App() {
     return () => document.removeEventListener("click", handleClick);
   }, [showUserMenu]);
 
-  // ─── Initialize session on mount ─────────────────────────────────────
+  // ─── Boot ────────────────────────────────────────────────────────────
   useEffect(() => {
-    async function init() {
+    // StrictMode mounts effects twice in development; without this guard that
+    // means two backend sessions per page load, one of them orphaned.
+    if (initRef.current) return;
+    initRef.current = true;
+
+    (async () => {
       try {
         const health = await checkHealth();
-        if (!health.openai_configured) return;
+        setBackendKeys(health);
 
-        const sid = await createSession();
-        setSessionId(sid);
-
-        if (user?.id) {
-          getTodayUsage(user.id).then(setTodayUsage);
+        // A missing server key is not fatal: if the server accepts keys from
+        // the browser, the user is asked for one when they first analyse.
+        if (!health.openai_configured && !health.allows_client_keys) {
+          setBackendError(
+            "This backend has no OpenAI key and does not accept one from the browser."
+          );
+          return;
         }
-      } catch (err) {
-        console.error("Backend connection failed:", err);
+        setSessionId(await createSession());
+      } catch {
+        setBackendError("Cannot reach the backend. Is it running on port 8000?");
       }
-    }
-    init();
+    })();
   }, []);
 
-  // ─── Handle starting screen capture ──────────────────────────────────
+  useEffect(() => {
+    if (userId) getTodayUsage(userId).then(setTodayUsage);
+  }, [userId]);
+
+  // ─── Actions ─────────────────────────────────────────────────────────
   const handleStartCapture = useCallback(async () => {
     const ok = await startCapture();
-    if (ok && !sessionId) {
+    if (ok && !sessionIdRef.current) {
       try {
-        const sid = await createSession();
-        setSessionId(sid);
-      } catch (err) {
-        console.error("Failed to create session:", err);
+        setSessionId(await createSession());
+      } catch {
+        setBackendError("Cannot reach the backend. Is it running on port 8000?");
       }
     }
-  }, [startCapture, sessionId]);
+  }, [startCapture]);
 
-  // ─── Handle stopping capture ─────────────────────────────────────────
-  // (stopCapture from hook is passed directly to ScreenPreview)
-
-  // ─── Capture frame and add to context (for multi-screen questions) ───
   const handleCaptureContext = useCallback(async () => {
-    if (!sessionId) return;
+    const id = sessionIdRef.current;
+    if (!id) return;
 
     const frame = captureFrame();
     if (!frame) return;
 
     try {
-      const result = await addScreenshot(sessionId, frame);
+      const result = await addScreenshot(id, frame, setSessionId);
       setContextCount(result.context_count);
+      if (!result.added && result.reason === "duplicate") {
+        setBackendError("That screen is already pinned as context.");
+        setTimeout(() => setBackendError(null), 2500);
+      }
     } catch (err) {
-      console.error("Failed to add screenshot:", err);
+      console.error("Failed to pin screenshot:", err);
     }
-  }, [sessionId, captureFrame]);
+  }, [captureFrame]);
 
-  // ─── Capture current screen + analyze with streaming ──────────────────
+  /** True when the server has no key of its own and the user has not given one. */
+  const needsApiKey = useCallback(
+    () => Boolean(backendKeys && !backendKeys.openai_configured && !getOpenAIKey()),
+    [backendKeys]
+  );
+
   const handleAnalyze = useCallback(
-    async (question = null) => {
-      if (!sessionId || isAnalyzing) return;
+    (question = null) => {
+      const id = sessionIdRef.current;
+      if (!id || isAnalyzing) return;
 
-      setIsAnalyzing(true);
-
-      const frame = captureFrame();
-      if (!frame) {
-        setIsAnalyzing(false);
+      // Ask for the key before capturing anything, so the user is not left
+      // looking at an empty answer card while a modal is open.
+      if (needsApiKey()) {
+        pendingQuestionRef.current = question;
+        setKeyPrompt({ needed: ["openai_key"] });
         return;
       }
 
-      // Create a live answer entry that updates as tokens stream in
-      const liveAnswer = {
-        answer: "",
-        question: question,
-        timestamp: new Date().toLocaleTimeString(),
-        streaming: true,
-      };
-      setAnswers((prev) => [liveAnswer, ...prev]);
+      const frame = captureFrame();
+      if (!frame) {
+        setBackendError("No frame available yet — is the screen still shared?");
+        return;
+      }
 
-      analyzeScreenStream(
-        sessionId,
-        frame,
-        question,
-        // onToken — append each token to the live answer
-        (token) => {
-          liveAnswer.answer += token;
-          setAnswers((prev) => {
-            const updated = [...prev];
-            updated[0] = { ...liveAnswer };
-            return updated;
-          });
+      const answerId = nextAnswerId();
+      activeIdRef.current = answerId;
+      bufferRef.current = "";
+      setIsAnalyzing(true);
+      setBackendError(null);
+      setAnswers((prev) => [
+        {
+          id: answerId,
+          question,
+          answer: "",
+          timestamp: new Date().toLocaleTimeString(),
+          streaming: true,
         },
-        // onDone
-        (info) => {
-          liveAnswer.streaming = false;
-          setContextCount(info.context_count);
-          setAnswers((prev) => {
-            const updated = [...prev];
-            updated[0] = { ...liveAnswer };
-            return updated;
-          });
-          setIsAnalyzing(false);
+        ...prev,
+      ]);
 
-          // Save to Supabase (fire-and-forget)
-          if (user?.id) {
-            saveAnalysis(user.id, question, liveAnswer.answer);
-            trackUsage(user.id);
-            setTodayUsage((n) => n + 1);
+      const finalise = (patch) => {
+        const text = bufferRef.current;
+        setAnswers((prev) =>
+          prev.map((item) =>
+            item.id === answerId ? { ...item, answer: text, streaming: false, ...patch } : item
+          )
+        );
+      };
+
+      abortRef.current = analyzeScreenStream({
+        sessionId: id,
+        imageBase64: frame,
+        question,
+        profile,
+        onNewSession: setSessionId,
+        onToken: (token) => {
+          bufferRef.current += token;
+          scheduleFlush();
+        },
+        onDone: (info) => {
+          setContextCount(info.context_count);
+          finalise({ usage: info.usage });
+          endStream();
+
+          const answer = bufferRef.current;
+          if (userId && answer.trim()) {
+            saveAnalysis(userId, question, answer);
+            trackUsage(userId).then((total) => {
+              if (typeof total === "number") setTodayUsage(total);
+            });
           }
         },
-        // onError
-        (errMsg) => {
-          liveAnswer.streaming = false;
-          liveAnswer.answer = liveAnswer.answer || `Error: ${errMsg}`;
-          setAnswers((prev) => {
-            const updated = [...prev];
-            updated[0] = { ...liveAnswer };
-            return updated;
-          });
-          setIsAnalyzing(false);
+        onError: (message) => {
+          finalise({ answer: bufferRef.current || `Error: ${message}`, error: message });
+          endStream();
         },
-        profile
-      );
+        onKeyRequired: (err) => {
+          // Drop the placeholder card — the request never reached the model,
+          // so leaving an empty answer behind would just be confusing.
+          setAnswers((prev) => prev.filter((item) => item.id !== answerId));
+          endStream();
+
+          if (err.refused) {
+            setBackendError(err.message);
+            return;
+          }
+          pendingQuestionRef.current = question;
+          setKeyPrompt({ needed: ["openai_key"], error: err.message });
+        },
+      });
     },
-    [sessionId, isAnalyzing, captureFrame, user, profile]
+    [isAnalyzing, captureFrame, profile, userId, scheduleFlush, endStream, needsApiKey]
   );
 
-  // ─── Handle clear context ────────────────────────────────────────────
-  const handleClearContext = useCallback(async () => {
-    if (!sessionId) return;
-    try {
-      await clearContext(sessionId);
-      setContextCount(0);
+  const handleKeySaved = useCallback(() => {
+    setKeyPrompt(null);
+    setBackendError(null);
+    const question = pendingQuestionRef.current;
+    pendingQuestionRef.current = null;
+    // Replay whatever the user was trying to do when we interrupted them.
+    handleAnalyze(question);
+  }, [handleAnalyze]);
 
+  const handleKeyCancelled = useCallback(() => {
+    setKeyPrompt(null);
+    pendingQuestionRef.current = null;
+  }, []);
+
+  const handleStopAnalyze = useCallback(() => {
+    abortRef.current?.();
+    const id = activeIdRef.current;
+    const text = bufferRef.current;
+    if (id) {
+      setAnswers((prev) =>
+        prev.map((item) =>
+          item.id === id
+            ? { ...item, answer: text || "_Stopped._", streaming: false, stopped: true }
+            : item
+        )
+      );
+    }
+    endStream();
+  }, [endStream]);
+
+  const handleClearContext = useCallback(async () => {
+    const id = sessionIdRef.current;
+    if (!id) return;
+    try {
+      await clearContext(id, setSessionId);
+      setContextCount(0);
     } catch (err) {
       console.error("Failed to clear context:", err);
     }
-  }, [sessionId]);
+  }, []);
+
+  const initials = user?.user_metadata?.full_name
+    ? user.user_metadata.full_name
+        .split(" ")
+        .map((n) => n[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase()
+    : (user?.email?.slice(0, 2) || "U").toUpperCase();
 
   return (
     <div className="app">
-      {/* Hidden canvas for frame capture */}
       <canvas ref={canvasRef} style={{ display: "none" }} />
 
-      {/* Header */}
       <header className="app-header">
         <div className="header-left">
           <Link to="/" className="app-logo">
@@ -228,9 +362,19 @@ function App() {
         </div>
         <div className="header-right">
           {todayUsage > 0 && (
-            <button className="header-btn">
+            <button className="header-btn" title="Analyses run today">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
               {todayUsage} Today
+            </button>
+          )}
+          {backendKeys && !backendKeys.openai_configured && (
+            <button
+              className="header-btn"
+              onClick={() => setKeyPrompt({ needed: ["openai_key"] })}
+              title={getOpenAIKey() ? "Replace your API key" : "Add your API key"}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+              {getOpenAIKey() ? "API key" : "Add key"}
             </button>
           )}
           <button
@@ -244,9 +388,7 @@ function App() {
           {user && (
             <div className="user-menu-wrapper">
               <div className="user-menu" onClick={() => setShowUserMenu(!showUserMenu)}>
-                <div className="user-avatar">
-                  {(user.user_metadata?.full_name ? user.user_metadata.full_name.split(" ").map(n => n[0]).join("").slice(0, 2) : user.email?.slice(0, 2) || "U").toUpperCase()}
-                </div>
+                <div className="user-avatar">{initials}</div>
                 <div className="user-info">
                   <span className="user-name">{user.user_metadata?.full_name || user.email?.split("@")[0] || "User"}</span>
                   <span className="user-email">{user.email}</span>
@@ -257,7 +399,14 @@ function App() {
                 <div className="user-dropdown">
                   <button
                     className="dropdown-item"
-                    onClick={async () => { setShowUserMenu(false); await signOut(); navigate("/"); }}
+                    onClick={async () => {
+                      setShowUserMenu(false);
+                      // The key belongs to the person who typed it, not to the
+                      // next person to use this browser.
+                      clearCredentials();
+                      await signOut();
+                      navigate("/");
+                    }}
                   >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
                     Sign out
@@ -269,18 +418,11 @@ function App() {
         </div>
       </header>
 
-      {/* Question Input */}
       <div className="question-bar">
-        <QuestionInput
-          onSubmit={handleAnalyze}
-          isAnalyzing={isAnalyzing}
-          isSharing={isSharing}
-        />
+        <QuestionInput onSubmit={handleAnalyze} isAnalyzing={isAnalyzing} isSharing={isSharing} />
       </div>
 
-      {/* Main Content */}
       <main className="app-main">
-        {/* Left Panel - Screen Capture */}
         <section className="panel panel-left">
           <ScreenPreview
             isSharing={isSharing}
@@ -289,20 +431,29 @@ function App() {
             onCaptureAndAnalyze={() => handleAnalyze(null)}
             onCaptureContext={handleCaptureContext}
             onClearContext={handleClearContext}
+            onStopAnalyze={handleStopAnalyze}
             videoRef={videoRef}
-            error={captureError}
+            error={captureError || backendError}
             contextCount={contextCount}
             isAnalyzing={isAnalyzing}
           />
         </section>
 
-        {/* Right Panel - AI Answers */}
         <section className="panel panel-right">
           <AnswerPanel answers={answers} isAnalyzing={isAnalyzing} />
         </section>
       </main>
 
       {showProfileModal && <ProfileModal onClose={() => setShowProfileModal(false)} />}
+
+      {keyPrompt && (
+        <ApiKeyModal
+          needed={keyPrompt.needed}
+          error={keyPrompt.error}
+          onSaved={handleKeySaved}
+          onCancel={handleKeyCancelled}
+        />
+      )}
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { useProfile } from "../contexts/ProfileContext";
+import { API_BASE } from "../config";
+import { useProfile } from "../contexts/profile-context";
 import "./ProfileModal.css";
 
 export default function ProfileModal({ onClose }) {
@@ -20,21 +21,23 @@ export default function ProfileModal({ onClose }) {
       const formData = new FormData();
       formData.append("file", file);
       try {
-        const res = await fetch("http://localhost:8000/api/parse-pdf", {
+        const res = await fetch(`${API_BASE}/parse-pdf`, {
           method: "POST",
           body: formData,
         });
-        const data = await res.json();
+        const data = await res.json().catch(() => ({}));
         if (res.ok) {
+          setError("");
           if (target === "cv") setCvText(data.text);
           else setJobDescription(data.text);
         } else {
-          setError(data.error || "Failed to parse PDF");
+          setError(data.error || "Could not read that PDF.");
         }
       } catch {
-        setError("Failed to upload PDF. Make sure the backend is running.");
+        setError("Upload failed. Is the backend running?");
+      } finally {
+        setLoading(false);
       }
-      setLoading(false);
     } else {
       const text = await file.text();
       if (target === "cv") setCvText(text);

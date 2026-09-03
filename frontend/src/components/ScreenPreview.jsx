@@ -10,6 +10,7 @@ export default function ScreenPreview({
   onCaptureAndAnalyze,
   onCaptureContext,
   onClearContext,
+  onStopAnalyze,
   videoRef,
   error,
   contextCount,
@@ -68,23 +69,20 @@ export default function ScreenPreview({
       {isSharing && (
         <div className="controls">
           <div className="controls-active">
-            <button
-              className={`btn btn-primary${!isAnalyzing ? " pulse-ready" : ""}`}
-              onClick={onCaptureAndAnalyze}
-              disabled={isAnalyzing}
-            >
-              {isAnalyzing ? (
-                <>
-                  <span className="spinner"></span>
-                  Analyzing...
-                </>
-              ) : (
-                <>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-                  Analyze
-                </>
-              )}
-            </button>
+            {isAnalyzing ? (
+              /* A long answer can run to thousands of tokens. Let the user
+                 abandon one that is clearly going the wrong way instead of
+                 waiting it out and paying for it. */
+              <button className="btn btn-primary" onClick={onStopAnalyze} title="Stop generating">
+                <svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>
+                Stop
+              </button>
+            ) : (
+              <button className="btn btn-primary pulse-ready" onClick={onCaptureAndAnalyze}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Analyze
+              </button>
+            )}
 
             <button
               className="btn btn-outline"
