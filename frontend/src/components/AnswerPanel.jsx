@@ -7,7 +7,7 @@
  * re-parsed the markdown of every answer on screen.
  */
 import { memo } from "react";
-import ReactMarkdown from "react-markdown";
+import Markdown from "./Markdown";
 
 import "./AnswerPanel.css";
 
@@ -54,7 +54,7 @@ const AnswerCard = memo(function AnswerCard({ item, number }) {
       )}
 
       <div className="answer-content">
-        <ReactMarkdown>{answer}</ReactMarkdown>
+        <Markdown>{answer}</Markdown>
         {streaming && <span className="cursor-blink">▏</span>}
       </div>
 

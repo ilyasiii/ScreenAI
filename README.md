@@ -1,15 +1,13 @@
 # ScreenAI
 
 A screen-reading assistant. It captures your screen, sends the frames to a
-vision model, and answers questions about what is on it — either typed, or
-spoken through a live voice channel. Answers can be tailored to a CV and job
-description you supply.
+vision model, and answers questions about what is on it — typed, or spoken by
+an interviewer and captured from the meeting audio. Answers can be tailored to
+a CV and job description you supply.
 
 React + Vite frontend, FastAPI backend, Supabase for auth and history.
-
-> **Status: local development only.** The backend has no authentication and no
-> rate limiting. Read [Before deploying](#before-deploying) before putting this
-> anywhere reachable.
+Live at **https://screenai.tech**. Deployment is covered in
+[deploy/README.md](deploy/README.md).
 
 ---
 
@@ -17,21 +15,21 @@ React + Vite frontend, FastAPI backend, Supabase for auth and history.
 
 ```
 Browser ──getDisplayMedia──▶ React (Vite)
-                              │
+                              │  every request carries the Supabase JWT
                     screenshots│  PNG at 768px short side
                               ▼
                         FastAPI backend ──▶ OpenAI vision  ──▶ SSE token stream
-                              │
-                    mic audio │  WebSocket
+                              ▲
+      meeting audio clip      │  one push-to-talk recording (WebM/Opus)
                               ▼
-                     Silero VAD ─▶ Groq whisper-large-v3 ─▶ LLM ─▶ spoken answer
+                     Groq whisper-large-v3 ─▶ LLM ─▶ SSE token stream
 
 React ──▶ Supabase (auth, analysis history, usage counts)
 ```
 
 Session state — pinned screenshots plus the last five exchanges — lives in
-memory in the backend process, keyed by a session UUID. Idle sessions are
-evicted every ten minutes.
+memory in the backend process, keyed by a session UUID and owned by the user
+who created it. Idle sessions are evicted every ten minutes.
 
 ### Why screenshots are 768px on the short side
 
@@ -68,14 +66,17 @@ price and a much shorter time to first token. Putting the images in the final
 message — after a history that grows every turn — means the most expensive part
 of the request is the one part that never gets cached.
 
-### Voice: what reaches Whisper
+### Voice: capturing the interviewer
 
-Voice activity detection decides **where** the speech is; it never deletes
-audio. The whole recording is kept, resampled in one pass, trimmed to the speech
-region with 350 ms of padding at each end, and normalised once as a single
-signal. Dropping sub-threshold chunks as they arrive — the obvious design —
-eats the leading consonant of most sentences and removes the pauses Whisper
-uses to punctuate.
+The browser captures the audio, not the server. The user shares the meeting
+tab with "Share tab audio" on (or the entire screen with "Share system audio"
+for a desktop meeting app), or falls back to the microphone. Each push-to-talk
+press records one clip with `MediaRecorder` and uploads it; Whisper accepts the
+browser's WebM/Opus or MP4 directly, so the server never decodes audio.
+
+A press that picked up no sound is dropped in the browser, and Whisper's stock
+output for silence ("Thank you.") is discarded on the server, so neither turns
+into an answer to a question nobody asked.
 
 If a profile is set, its job title and the distinctive technical terms in the
 job description are passed to Whisper as a vocabulary hint, so role-specific
@@ -89,8 +90,8 @@ app asks the signed-in user for when they first need it:
 - Start an analysis with no OpenAI key configured and a prompt appears. The key
   is kept in that browser tab's `sessionStorage`, sent as an `X-OpenAI-Api-Key`
   header, and never written to disk or stored with session state on the server.
-- Voice mode does the same over its WebSocket handshake, asking for the Groq
-  key and the voice provider's key.
+- Voice mode does the same, asking for the Groq key and the voice provider's
+  key; they travel as `X-Groq-Api-Key` / `X-OpenAI-Api-Key` headers.
 - Keys are cleared on sign-out and when the tab closes.
 
 **A key in `backend/.env` always wins.** Users are never prompted for a
@@ -106,17 +107,12 @@ redirect usage away from a configured one. So:
 With `ALLOW_CLIENT_API_KEYS=false` and no server key, the app reports the
 problem rather than prompting for a key it would refuse.
 
-`sessionStorage` is readable by any script on the page. That is a fair trade
-for a locally-run tool, and not a substitute for a server-side key in a real
-deployment.
+`sessionStorage` is readable by any script on the page, which is why the site
+ships a Content-Security-Policy allowing scripts from its own origin only.
 
 ## Requirements
 
-- **Python 3.10+** and **Node 18+**. Verified on 3.12 and 3.14; 3.12 is the
-  safer choice for the voice feature (see the note under Backend setup).
-- **Windows.** `PyAudioWPatch` is Windows-only, so the voice feature — and
-  therefore `pip install -r requirements.txt` — will not work on macOS or Linux.
-  Screen analysis itself is platform-independent; the dependency is not.
+- **Python 3.10+** and **Node 22.12+**. Any OS.
 - An **OpenAI API key** (vision, and the voice LLM by default) — in
   `backend/.env`, or entered by each user in the browser
 - A **Groq API key** (speech-to-text) — only for the voice feature, same choice
@@ -129,19 +125,15 @@ deployment.
 ```bash
 cd backend
 python -m venv venv
-venv\Scripts\activate            # Windows
-pip install -r requirements.txt
+venv\Scripts\activate            # Windows; source venv/bin/activate elsewhere
+pip install -r requirements-dev.txt
 
-cp .env.example .env             # then fill in your keys
+cp .env.example .env             # set SUPABASE_URL at minimum
 python -m uvicorn main:app --reload --port 8000
 ```
 
-`torch` and `torchaudio` are pulled in solely to run Silero VAD on the CPU. If
-pip resolves a CUDA build on your platform, install the CPU wheels first:
-
-```bash
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
-```
+`SUPABASE_URL` is required: the backend verifies every request's Supabase
+token against it and refuses requests without one.
 
 **If the install tries to compile `pydantic-core` and fails on a missing
 `link.exe`,** you are on a Python version that has no prebuilt wheel for some
@@ -158,11 +150,6 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 ```
-
-On **Python 3.14**, Silero VAD still loads but torch prints a warning that
-`torch.jit.load` "is not supported in Python 3.14+ and may break". It works
-today; if voice mode ever fails to load the VAD after a torch upgrade, use
-Python 3.12.
 
 Check it came up: <http://localhost:8000/health>.
 
@@ -186,7 +173,17 @@ Create a project, then two tables:
 
 **Enable Row Level Security on both, with policies restricting rows to
 `auth.uid() = user_id`.** The anon key is shipped to the browser by design — RLS
-is the only thing preventing any visitor from reading and writing every row.
+is the only thing preventing any visitor from reading and writing every row:
+
+```sql
+alter table analysis_history enable row level security;
+alter table usage_tracking  enable row level security;
+
+create policy "own history" on analysis_history
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "own usage" on usage_tracking
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+```
 
 Then add the atomic usage counter. Without it the client falls back to a
 read-modify-write that loses increments when two analyses finish together:
@@ -215,6 +212,9 @@ Backend settings live in `backend/.env`, frontend settings in
 
 | Variable | Default | Purpose |
 | :--- | :--- | :--- |
+| `SUPABASE_URL` | — | **Required.** Project whose tokens the API accepts |
+| `SUPABASE_JWT_SECRET` | — | Only for legacy HS256 projects |
+| `ENVIRONMENT` | `development` | `production` hides API docs, enables HSTS |
 | `OPENAI_API_KEY` | — | Vision and the voice LLM. Blank prompts the user |
 | `GROQ_API_KEY` | — | Speech-to-text. Blank prompts the user |
 | `ANTHROPIC_API_KEY` | — | Only when `LLM_PROVIDER=anthropic` |
@@ -225,7 +225,8 @@ Backend settings live in `backend/.env`, frontend settings in
 | `IMAGE_JPEG_QUALITY` | `88` | Below ~80, JPEG ringing starts costing answers |
 | `MAX_CONTEXT_IMAGES` | `6` | Main cost dial: ~1.1k tokens per pinned frame |
 | `CORS_ORIGINS` | localhost:3000,5173 | Allowed browser origins |
-| `VITE_API_URL` | localhost:8000 | Backend origin; the WS URL derives from it |
+| `RATE_LIMIT_*_PER_MIN` | 20–40 | Per-user request limits |
+| `VITE_API_URL` | localhost:8000 | Backend origin; https in production |
 
 Each voice provider reads its **own** key, so switching `LLM_PROVIDER` no longer
 breaks screenshot analysis.
@@ -234,14 +235,19 @@ breaks screenshot analysis.
 
 | Method | Path | Purpose |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Which keys are configured, model, live session count |
+| `GET` | `/health` | Which keys are configured (public) |
 | `POST` | `/api/session/create` | New session UUID |
 | `POST` | `/api/screenshot/add` | Pin a frame as context (deduplicated) |
 | `POST` | `/api/analyze/stream` | Analyse; streams tokens over SSE |
 | `POST` | `/api/context/clear/{id}` | Drop pinned frames, keep conversation |
 | `DELETE` | `/api/session/{id}` | Delete the session |
 | `POST` | `/api/parse-pdf` | Extract CV text from an uploaded PDF |
-| `WS` | `/ws/voice` | Live audio in, streamed answer out |
+| `POST` | `/api/voice/answer` | Recorded question in; transcript + answer over SSE |
+| `POST` | `/api/voice/reset/{id}` | Forget the voice conversation |
+
+Everything except `/health` requires `Authorization: Bearer <Supabase access
+token>` and is rate limited per user. Sessions belong to the user who created
+them; another user's session ID behaves exactly like an unknown one.
 
 Unknown session IDs return `404 {"code": "session_not_found"}`. The client
 treats that as "create a new session and retry once", so a backend restart is
@@ -255,11 +261,10 @@ correct it.
 
 SSE events are typed: `start`, `token`, `done`, `error`.
 
-`/ws/voice` opens with a handshake. The server sends
-`{"type": "ready", "needs_groq_key": bool, "needs_llm_key": bool, ...}`; the
-client replies with `{"action": "init", "credentials": {...}}`. The audio
-pipeline is only built once that is accepted, so opening the page no longer
-seizes the loopback device.
+`/api/voice/answer` takes a multipart upload (`session_id`, `audio`, optional
+`profile` JSON) and streams `start`, `transcription`, `token`, `done`, or
+`no_speech` when nothing intelligible was said. A missing key returns
+`401 {"code": "api_key_required", "needed": [...]}` naming every key to ask for.
 
 ## Tests
 
@@ -268,9 +273,11 @@ cd backend
 python -m pytest
 ```
 
-Covers image sizing and the tile-cost formula, perceptual-hash deduplication,
-session lifecycle and window trimming, prompt-cache message ordering, the audio
-conversion maths, and credential precedence. No network, keys, or audio device
+Covers image sizing and the tile-cost formula, decompression-bomb and format
+guards, perceptual-hash deduplication, session lifecycle, ownership and caps,
+prompt-cache message ordering, credential precedence, and the HTTP security
+layer: token verification (forged, expired, wrong-project and unsigned tokens),
+rate limits, body-size limits, CORS and response headers. No network or keys
 required.
 
 ```bash
@@ -279,41 +286,34 @@ npm run lint
 npm run build
 ```
 
-## Before deploying
+## Security model
 
-These are known and unfixed. Each one is fine on `localhost` and not fine on a
-public host.
+- **Authentication.** Every API request carries the user's Supabase access
+  token, verified locally against the project's JWKS (or the legacy HS256
+  secret): signature, issuer, audience and expiry. A server without
+  `SUPABASE_URL` refuses everything rather than running open.
+- **Isolation.** Sessions are bound to the token's user. Caps per user and in
+  total bound the memory any one account can hold.
+- **Abuse limits.** Per-user rate limits on every endpoint group (PDF parsing
+  has its own small budget). Request bodies are capped before they are read,
+  and only read *after* sign-in and rate-limit checks pass, then validated
+  without building intermediate objects, so oversized or deeply nested
+  payloads cannot exhaust memory. Images are restricted to PNG/JPEG/WebP,
+  checked for decompression bombs, decoded two at a time, and re-compressed so
+  no frame pins more than ~1.5 MB; all pinned screenshots share a global
+  memory budget. PDFs are checked by content and parsed in a separate process
+  that is killed at a 20-second deadline (and memory-capped on Linux), one at a
+  time. Audio is restricted to recorder formats and size-capped.
+- **User keys.** Sent per request in headers, used once, never stored or
+  logged. The server key, when set, always wins.
+- **Browser.** A Content-Security-Policy limits scripts to the site's own
+  origin; the app refuses to render inside a frame; CVs and keys are cleared
+  on sign-out and scoped to the signed-in user.
+- **Transport.** HTTPS everywhere; HSTS and hardening headers on the API.
 
-**No authentication on the backend.** The frontend never sends the Supabase JWT,
-and the backend never checks for one. Anyone who can reach the API can call
-`/api/analyze/stream` and spend your OpenAI credits without limit. Verify the
-Supabase JWT in a FastAPI dependency before exposing this.
-
-**Session IDs are not tied to a user.** Unknown IDs are now rejected rather than
-silently creating a session, but a *valid* guessed ID still returns another
-user's screenshots and conversation. Bind sessions to the JWT subject.
-
-**No rate limiting.** Payload size is capped (`MAX_IMAGE_BYTES`,
-`MAX_PDF_BYTES`) but request frequency is not.
-
-**User-supplied keys pass through an unauthenticated backend.** With no server
-key set, anyone who can reach the API can have it call OpenAI with a key they
-supply. That costs you nothing directly, but it makes your server an open proxy
-for someone else's key. Either set a server key and
-`ALLOW_CLIENT_API_KEYS=false`, or put authentication in front of the API, before
-exposing this.
-
-**`user_id` is supplied by the client** when writing history and usage. RLS is
-what makes that safe. Usage limits are advisory and enforced in the browser only.
-
-**In-memory session store.** `services/context_manager.py` is a process
-singleton: state is lost on restart and is not shared across workers, so the app
-is single-instance only. Redis would fix both.
-
-**The voice feature is structurally single-user.** It captures system-wide
-WASAPI loopback audio and opens a fresh loopback stream per WebSocket
-connection, so two tabs fight over one device. It is a local desktop feature,
-not a server one.
+Known limits: sessions and rate-limit counters live in process memory, so the
+backend runs as a single instance (restart = sessions recreated transparently).
+Usage counts in Supabase are advisory and written by the client under RLS.
 
 ## Licence
 

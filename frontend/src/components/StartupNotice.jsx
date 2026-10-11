@@ -69,20 +69,23 @@ export class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, info) {
-    console.error("Unhandled render error:", error, info);
+    if (import.meta.env.DEV) console.error("Unhandled render error:", error, info);
   }
 
   render() {
     if (!this.state.error) return this.props.children;
 
+    // Stack traces are for developers; in production they only describe the
+    // app's internals to whoever is looking.
+    const detail = import.meta.env.DEV
+      ? this.state.error?.stack || String(this.state.error)
+      : null;
+
     return (
-      <Notice
-        title="Something went wrong"
-        detail={this.state.error?.stack || String(this.state.error)}
-      >
+      <Notice title="Something went wrong" detail={detail}>
         <p>
-          The app hit an error it could not recover from. The details below are
-          also in the browser console.
+          The app hit an error it could not recover from. Reloading the page
+          usually fixes it.
         </p>
         <button className="startup-button" onClick={() => window.location.reload()}>
           Reload

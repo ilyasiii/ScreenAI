@@ -1,0 +1,234 @@
+# Build, test and deploy ScreenAI.
+#
+#   Every push and pull request:  backend tests, frontend lint + build,
+#                                 backend image build (pushed only from main).
+#   Push to main:                 frontend -> GitHub Pages (screenai.tech),
+#                                 backend  -> Docker image on ghcr.io,
+#                                 backend  -> your server, once DEPLOY_HOST is set.
+#   Weekly + every push:          dependency vulnerability audit (reports only;
+#                                 never blocks a deploy).
+#
+# One-time setup (Settings in the GitHub repo):
+#   Pages -> Source: "GitHub Actions"; Custom domain: screenai.tech; Enforce HTTPS.
+#   Secrets and variables -> Actions -> Variables:
+#     VITE_API_URL            https://api.screenai.tech
+#     VITE_SUPABASE_URL       https://<project>.supabase.co
+#     VITE_SUPABASE_ANON_KEY  the anon (public) key - never the service_role key
+#   Optional, to deploy the backend over SSH (see deploy/README.md):
+#     Variables: DEPLOY_HOST, DEPLOY_USER, DEPLOY_HOST_FINGERPRINT
+#     Secret:    DEPLOY_SSH_KEY
+
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * 1" # Mondays: catch newly published advisories
+  workflow_dispatch:
+
+# Least privilege by default; jobs that need more ask for it explicitly.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # A newer push to a pull request replaces the run in progress; runs on main
+  # queue instead, so a deploy is never cut off halfway.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Deploy jobs run for pushes to main and manual runs, never for pull
+  # requests or the weekly audit schedule.
+  IS_RELEASE: ${{ github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+
+jobs:
+  backend-test:
+    name: Backend tests
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+  frontend-build:
+    name: Frontend build
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      # Repository variables are not passed to pull requests from forks, so
+      # those builds get inert placeholders. A push to main with a variable
+      # missing still fails the build loudly.
+      VITE_API_URL: ${{ vars.VITE_API_URL || (github.event_name == 'pull_request' && 'https://api.example.invalid') || '' }}
+      VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || (github.event_name == 'pull_request' && 'https://example.supabase.co') || '' }}
+      VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || (github.event_name == 'pull_request' && 'placeholder-anon-key') || '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        # Fails with a clear message if any VITE_* variable above is missing,
+        # if VITE_API_URL is not https, or if the key is a service_role key.
+        run: npm run build
+
+      - name: SPA fallback for deep links
+        # GitHub Pages serves 404.html for unknown paths, so /app, /auth and
+        # /reset-password load the app instead of a GitHub error page.
+        run: cp dist/index.html dist/404.html
+
+      - name: Upload Pages artifact
+        if: env.IS_RELEASE == 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: frontend/dist
+
+  audit:
+    name: Dependency audit
+    # Deliberately not a dependency of any deploy job: a newly published
+    # advisory, or the advisory service being down, must not block a hotfix.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Python dependencies
+        run: |
+          pip install pip-audit==2.9.0
+          pip-audit -r backend/requirements.txt
+
+      - name: Frontend runtime dependencies
+        if: ${{ !cancelled() }}
+        working-directory: frontend
+        run: npm audit --omit=dev --audit-level=high
+
+  pages-deploy:
+    name: Deploy frontend to GitHub Pages
+    needs: [backend-test, frontend-build]
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5
+
+  backend-image:
+    name: Backend image
+    needs: backend-test
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Lets the image build for ARM servers too (Hetzner CAX, Oracle Ampere...).
+      - uses: docker/setup-qemu-action@v4
+        if: env.IS_RELEASE == 'true'
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        if: env.IS_RELEASE == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/screenai-backend
+          tags: |
+            type=raw,value=latest
+            type=sha,format=short
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: backend
+          # Pull requests build (to catch a broken Dockerfile before merge)
+          # but never publish.
+          push: ${{ env.IS_RELEASE == 'true' }}
+          platforms: ${{ env.IS_RELEASE == 'true' && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  backend-deploy:
+    name: Deploy backend to server
+    needs: backend-image
+    # Skipped until a server exists: set the DEPLOY_HOST variable to enable.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.DEPLOY_HOST != ''
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Pull and restart over SSH
+        # Pinned to a commit: this step handles the server's private key.
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1.2.5
+        with:
+          host: ${{ vars.DEPLOY_HOST }}
+          username: ${{ vars.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          # SHA256 host key fingerprint, so the deploy cannot be redirected to
+          # an impostor. Get it with: ssh-keyscan <host> | ssh-keygen -lf -
+          fingerprint: ${{ vars.DEPLOY_HOST_FINGERPRINT }}
+          script: |
+            set -e
+            cd ~/screenai
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f

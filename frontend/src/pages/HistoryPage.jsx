@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import ReactMarkdown from "react-markdown";
+import Markdown from "../components/Markdown";
 import { useAuth } from "../contexts/auth-context";
 import { getHistory } from "../services/supabaseService";
 import "./HistoryPage.css";
@@ -77,7 +77,7 @@ function HistoryPage() {
                 </div>
                 {expanded === item.id && (
                   <div className="history-answer" onClick={(e) => e.stopPropagation()}>
-                    <ReactMarkdown>{item.answer}</ReactMarkdown>
+                    <Markdown>{item.answer}</Markdown>
                   </div>
                 )}
               </div>

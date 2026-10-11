@@ -25,6 +25,7 @@ import {
   checkHealth,
   clearContext,
   createSession,
+  deleteSession,
 } from "./services/api";
 import { clearCredentials, getOpenAIKey } from "./services/credentials";
 import { getTodayUsage, saveAnalysis, trackUsage } from "./services/supabaseService";
@@ -32,6 +33,14 @@ import "./App.css";
 
 let answerSeq = 0;
 const nextAnswerId = () => `a${Date.now().toString(36)}-${answerSeq++}`;
+
+/** A user-facing reason the workspace could not start. */
+function describeBootError(err) {
+  const detail = err?.response?.data?.detail;
+  if (detail?.message) return detail.message;
+  if (err?.response?.status === 429) return "Too many requests. Wait a moment and reload.";
+  return "Cannot reach the server. Check your connection and reload.";
+}
 
 function App() {
   const { user, signOut } = useAuth();
@@ -70,8 +79,9 @@ function App() {
   const frameRef = useRef(0);
   const sessionIdRef = useRef(null);
   const initRef = useRef(false);
-  // The question to replay once the user has entered a key.
-  const pendingQuestionRef = useRef(null);
+  // The analysis to replay once the user has entered a key: `{ question }`, or
+  // null when the prompt was opened from the header with nothing pending.
+  const pendingRef = useRef(null);
 
   useEffect(() => {
     sessionIdRef.current = sessionId;
@@ -108,6 +118,9 @@ function App() {
     () => () => {
       abortRef.current?.();
       if (frameRef.current) cancelAnimationFrame(frameRef.current);
+      // Sessions hold screenshots in server memory; do not leave one behind
+      // for every visit to this page.
+      if (sessionIdRef.current) deleteSession(sessionIdRef.current);
     },
     []
   );
@@ -143,8 +156,8 @@ function App() {
           return;
         }
         setSessionId(await createSession());
-      } catch {
-        setBackendError("Cannot reach the backend. Is it running on port 8000?");
+      } catch (err) {
+        setBackendError(describeBootError(err));
       }
     })();
   }, []);
@@ -159,8 +172,8 @@ function App() {
     if (ok && !sessionIdRef.current) {
       try {
         setSessionId(await createSession());
-      } catch {
-        setBackendError("Cannot reach the backend. Is it running on port 8000?");
+      } catch (err) {
+        setBackendError(describeBootError(err));
       }
     }
   }, [startCapture]);
@@ -180,7 +193,7 @@ function App() {
         setTimeout(() => setBackendError(null), 2500);
       }
     } catch (err) {
-      console.error("Failed to pin screenshot:", err);
+      setBackendError(describeBootError(err));
     }
   }, [captureFrame]);
 
@@ -198,7 +211,7 @@ function App() {
       // Ask for the key before capturing anything, so the user is not left
       // looking at an empty answer card while a modal is open.
       if (needsApiKey()) {
-        pendingQuestionRef.current = question;
+        pendingRef.current = { question };
         setKeyPrompt({ needed: ["openai_key"] });
         return;
       }
@@ -271,7 +284,7 @@ function App() {
             setBackendError(err.message);
             return;
           }
-          pendingQuestionRef.current = question;
+          pendingRef.current = { question };
           setKeyPrompt({ needed: ["openai_key"], error: err.message });
         },
       });
@@ -282,15 +295,16 @@ function App() {
   const handleKeySaved = useCallback(() => {
     setKeyPrompt(null);
     setBackendError(null);
-    const question = pendingQuestionRef.current;
-    pendingQuestionRef.current = null;
-    // Replay whatever the user was trying to do when we interrupted them.
-    handleAnalyze(question);
+    const pending = pendingRef.current;
+    pendingRef.current = null;
+    // Replay whatever the user was trying to do when we interrupted them, and
+    // nothing at all if they opened the prompt themselves.
+    if (pending) handleAnalyze(pending.question);
   }, [handleAnalyze]);
 
   const handleKeyCancelled = useCallback(() => {
     setKeyPrompt(null);
-    pendingQuestionRef.current = null;
+    pendingRef.current = null;
   }, []);
 
   const handleStopAnalyze = useCallback(() => {
@@ -316,7 +330,7 @@ function App() {
       await clearContext(id, setSessionId);
       setContextCount(0);
     } catch (err) {
-      console.error("Failed to clear context:", err);
+      setBackendError(describeBootError(err));
     }
   }, []);
 
@@ -401,11 +415,18 @@ function App() {
                     className="dropdown-item"
                     onClick={async () => {
                       setShowUserMenu(false);
-                      // The key belongs to the person who typed it, not to the
-                      // next person to use this browser.
-                      clearCredentials();
-                      await signOut();
-                      navigate("/");
+                      // Freed while the token still works.
+                      const id = sessionIdRef.current;
+                      sessionIdRef.current = null;
+                      if (id) await deleteSession(id);
+                      try {
+                        // The key belongs to the person who typed it, not to
+                        // the next person to use this browser.
+                        clearCredentials();
+                        await signOut();
+                      } finally {
+                        navigate("/");
+                      }
                     }}
                   >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>

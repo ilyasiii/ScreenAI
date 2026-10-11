@@ -10,12 +10,12 @@
  *   - it is per-tab, so signing out in one tab cannot strand a key in another.
  *
  * This is still browser storage, and any script running on the page can read
- * it. That is an acceptable trade for a locally-run tool where the alternative
- * is not running at all — it is not a substitute for a server-side key in a
- * deployment.
+ * it. The site's Content-Security-Policy allows scripts from this origin only,
+ * which is what keeps that set of scripts trustworthy. Keys are sent to the
+ * backend over HTTPS for the one request that needs them and never stored there.
  */
 
-const STORAGE_KEY = "screenai_api_keys";
+import { CREDENTIALS_KEY as STORAGE_KEY } from "../contexts/storage-keys";
 
 /** @typedef {{ openai_key?: string, groq_key?: string, anthropic_key?: string }} Credentials */
 

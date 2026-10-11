@@ -1,7 +1,11 @@
 import { useState } from "react";
-import { API_BASE } from "../config";
 import { useProfile } from "../contexts/profile-context";
+import { parsePdf } from "../services/api";
 import "./ProfileModal.css";
+
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+// Matches the server's cap on extracted PDF text.
+const MAX_TEXT_CHARS = 60_000;
 
 export default function ProfileModal({ onClose }) {
   const { profile, saveProfile, markOnboarded } = useProfile();
@@ -16,30 +20,26 @@ export default function ProfileModal({ onClose }) {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setError("That file is larger than 10 MB.");
+      e.target.value = "";
+      return;
+    }
+
     if (file.type === "application/pdf") {
       setLoading(true);
-      const formData = new FormData();
-      formData.append("file", file);
       try {
-        const res = await fetch(`${API_BASE}/parse-pdf`, {
-          method: "POST",
-          body: formData,
-        });
-        const data = await res.json().catch(() => ({}));
-        if (res.ok) {
-          setError("");
-          if (target === "cv") setCvText(data.text);
-          else setJobDescription(data.text);
-        } else {
-          setError(data.error || "Could not read that PDF.");
-        }
-      } catch {
-        setError("Upload failed. Is the backend running?");
+        const text = await parsePdf(file);
+        setError("");
+        if (target === "cv") setCvText(text);
+        else setJobDescription(text);
+      } catch (err) {
+        setError(err.message || "Could not read that PDF.");
       } finally {
         setLoading(false);
       }
     } else {
-      const text = await file.text();
+      const text = (await file.text()).slice(0, MAX_TEXT_CHARS);
       if (target === "cv") setCvText(text);
       else setJobDescription(text);
     }
