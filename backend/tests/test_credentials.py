@@ -105,22 +105,18 @@ class TestVoiceProviderKey:
             resolve_voice_llm_key(None)
 
 
-class TestClientCache:
-    def test_same_key_reuses_one_client(self):
-        first = credentials.get_openai_client(CLIENT_KEY)
-        second = credentials.get_openai_client(CLIENT_KEY)
-        # A fresh client per request would leak a connection pool each time.
-        assert first is second
+class TestClientPool:
+    def test_each_key_gets_its_own_credentials(self):
+        first = credentials.get_openai_client("sk-one-" + "d" * 30)
+        second = credentials.get_openai_client("sk-two-" + "e" * 30)
+        assert first.api_key != second.api_key
 
-    def test_distinct_keys_get_distinct_clients(self):
-        assert credentials.get_openai_client("sk-one-" + "d" * 30) is not (
-            credentials.get_openai_client("sk-two-" + "e" * 30)
-        )
-
-    def test_cache_is_bounded(self):
-        for i in range(credentials._MAX_CACHED_CLIENTS + 5):
-            credentials.get_openai_client(f"sk-bound-{i}-" + "f" * 30)
-        assert len(credentials._clients) <= credentials._MAX_CACHED_CLIENTS
+    def test_all_keys_share_one_connection_pool(self):
+        # One pool means nothing per key to evict, so a busy server can never
+        # close a client out from under another user's streaming answer.
+        first = credentials.get_openai_client("sk-one-" + "d" * 30)
+        second = credentials.get_openai_client("sk-two-" + "e" * 30)
+        assert first._client is second._client
 
 
 class TestFingerprint:

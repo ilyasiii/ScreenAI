@@ -82,8 +82,8 @@ class Settings:
     # Screenshots are mostly text. 4:4:4 chroma (no subsampling) at q88 keeps
     # syntax-highlighted code legible; the old q40 shredded small glyphs.
     image_jpeg_quality: int = _int("IMAGE_JPEG_QUALITY", 88)
-    # Reject absurd uploads before decoding them.
-    max_image_bytes: int = _int("MAX_IMAGE_BYTES", 12 * 1024 * 1024)
+    # Reject absurd uploads before decoding them. The browser sends ~1-2 MB.
+    max_image_bytes: int = _int("MAX_IMAGE_BYTES", 6 * 1024 * 1024)
     max_pdf_bytes: int = _int("MAX_PDF_BYTES", 10 * 1024 * 1024)
 
     # ── Session state ────────────────────────────────────────────────────
@@ -102,13 +102,54 @@ class Settings:
     # server-side key and refuse client-supplied ones outright.
     allow_client_keys: bool = _bool("ALLOW_CLIENT_API_KEYS", True)
 
+    # ── Authentication ───────────────────────────────────────────────────
+    # Every API call must carry the caller's Supabase access token. Without
+    # this the backend is an open relay: anyone who finds the URL can burn CPU
+    # on image and PDF decoding, or route their own traffic through it.
+    supabase_url: str = _str("SUPABASE_URL").rstrip("/")
+    # Only needed for projects still on the legacy shared-secret (HS256) JWTs.
+    # Projects on asymmetric signing keys are verified against the public JWKS
+    # and need nothing secret here.
+    supabase_jwt_secret: str = _str("SUPABASE_JWT_SECRET")
+    # Escape hatch for offline local development only. Never disable in production.
+    require_auth: bool = _bool("REQUIRE_AUTH", True)
+
+    # ── Abuse limits ─────────────────────────────────────────────────────
+    # Whole-request cap, enforced before the body is parsed. FastAPI has no
+    # limit of its own, so without this a single request can exhaust memory.
+    max_request_bytes: int = _int("MAX_REQUEST_BYTES", 12 * 1024 * 1024)
+    max_audio_bytes: int = _int("MAX_AUDIO_BYTES", 10 * 1024 * 1024)
+    max_pdf_pages: int = _int("MAX_PDF_PAGES", 40)
+    # Sessions hold decoded screenshots in memory, so they are capped per user
+    # and globally.
+    max_sessions_per_user: int = _int("MAX_SESSIONS_PER_USER", 4)
+    max_sessions_total: int = _int("MAX_SESSIONS_TOTAL", 500)
+    # Memory held by pinned screenshots across all sessions. Pinning is refused
+    # (503) past this, rather than letting a few accounts exhaust the server.
+    # Size it to roughly a quarter of the machine's RAM.
+    max_context_bytes_total: int = _int("MAX_CONTEXT_BYTES_TOTAL", 256 * 1024 * 1024)
+    # Requests per user per minute, per endpoint group.
+    rate_limit_analyze: int = _int("RATE_LIMIT_ANALYZE_PER_MIN", 20)
+    rate_limit_upload: int = _int("RATE_LIMIT_UPLOAD_PER_MIN", 40)
+    rate_limit_voice: int = _int("RATE_LIMIT_VOICE_PER_MIN", 20)
+    rate_limit_session: int = _int("RATE_LIMIT_SESSION_PER_MIN", 20)
+    # PDF parsing is the most expensive request; it gets its own small budget.
+    rate_limit_pdf: int = _int("RATE_LIMIT_PDF_PER_MIN", 6)
+    # Cheap housekeeping calls (clear context, delete session, reset memory).
+    rate_limit_light: int = _int("RATE_LIMIT_LIGHT_PER_MIN", 60)
+
     # ── Server ───────────────────────────────────────────────────────────
+    environment: str = _str("ENVIRONMENT", "development").lower()
     cors_origins: list[str] = [
-        o.strip()
+        o.strip().rstrip("/")
         for o in _str("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173").split(",")
         if o.strip()
     ]
     log_level: str = _str("LOG_LEVEL", "INFO").upper()
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
 
     # ── Derived ──────────────────────────────────────────────────────────
     @property

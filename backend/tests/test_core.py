@@ -6,7 +6,7 @@ Run from the backend directory:
     pip install pytest
     python -m pytest
 
-No network, no API keys, no audio device required.
+No network and no API keys required.
 """
 
 import base64
@@ -15,7 +15,6 @@ import random
 import sys
 from pathlib import Path
 
-import numpy as np
 import pytest
 from PIL import Image
 
@@ -23,10 +22,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import settings  # noqa: E402
 from services import image_utils  # noqa: E402
-from services.audio_processing import _normalise, _resample, _to_mono  # noqa: E402
-from services.context_manager import ContextManager  # noqa: E402
+from services.context_manager import ContextManager, SessionLimitError  # noqa: E402
 from services.openai_vision import build_messages  # noqa: E402
-from services.voice_transcription import build_asr_prompt  # noqa: E402
+from services.voice_transcription import (  # noqa: E402
+    audio_extension,
+    build_asr_prompt,
+    is_silence,
+)
 
 
 # --- helpers ---------------------------------------------------------------
@@ -49,10 +51,10 @@ def distinct_hashes(count: int) -> list[int]:
 
 def make_image_b64(width: int, height: int, noise: bool = False) -> str:
     """A deterministic test image with enough structure to hash meaningfully."""
-    rng = np.random.default_rng(1234 if not noise else 9999)
-    array = rng.integers(0, 255, size=(height, width, 3), dtype=np.uint8)
+    rng = random.Random(1234 if not noise else 9999)
+    image = Image.frombytes("RGB", (width, height), rng.randbytes(width * height * 3))
     buf = io.BytesIO()
-    Image.fromarray(array).save(buf, format="PNG")
+    image.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
@@ -108,6 +110,25 @@ class TestPrepareImage:
     def test_estimated_tokens_matches_the_tile_formula(self):
         # 1365x768 -> 3x2 tiles -> 6 * 170 + 85
         assert image_utils.estimate_tokens(1365, 768) == 6 * 170 + 85
+
+
+class TestImageSafety:
+    def test_oversized_dimensions_are_refused_before_decoding(self, monkeypatch):
+        monkeypatch.setattr(image_utils, "MAX_IMAGE_PIXELS", 100 * 100)
+        with pytest.raises(ValueError):
+            image_utils.prepare_image(make_image_b64(200, 200))
+
+    def test_photo_like_frames_are_recompressed_to_a_bounded_size(self):
+        # Random noise is the worst case for JPEG: it stands in for a full-screen
+        # photo or video frame.
+        prepared, _ = image_utils.prepare_image(make_image_b64(2048, 768, noise=True))
+        assert len(prepared) <= image_utils.MAX_FRAME_B64_BYTES
+
+    def test_unexpected_formats_are_refused(self):
+        buf = io.BytesIO()
+        Image.new("RGB", (10, 10)).save(buf, format="BMP")
+        with pytest.raises(Exception):
+            image_utils.prepare_image(base64.b64encode(buf.getvalue()).decode("ascii"))
 
 
 class TestDuplicateDetection:
@@ -197,6 +218,34 @@ class TestContextManager:
         assert manager.cleanup_old_sessions(max_age_seconds=3600) == 0
         assert manager.get(session_id) is not None
 
+    def test_other_users_cannot_see_a_session(self):
+        manager = ContextManager()
+        session_id = manager.create_session(owner_id="alice")
+        assert manager.get(session_id, owner_id="alice") is not None
+        assert manager.get(session_id, owner_id="mallory") is None
+        assert manager.delete_session(session_id, owner_id="mallory") is False
+        assert manager.get(session_id, owner_id="alice") is not None
+
+    def test_per_user_cap_evicts_least_recent(self, monkeypatch):
+        monkeypatch.setattr(settings, "max_sessions_per_user", 2, raising=False)
+        manager = ContextManager()
+        first = manager.create_session(owner_id="alice")
+        manager.get(first).last_activity = 0
+        second = manager.create_session(owner_id="alice")
+        third = manager.create_session(owner_id="alice")
+        assert manager.get(first) is None
+        assert manager.get(second) is not None and manager.get(third) is not None
+        # Another user's sessions are untouched by alice's cap.
+        assert manager.get(manager.create_session(owner_id="bob")) is not None
+
+    def test_global_cap_refuses_new_sessions(self, monkeypatch):
+        monkeypatch.setattr(settings, "max_sessions_total", 2, raising=False)
+        manager = ContextManager()
+        manager.create_session(owner_id="a")
+        manager.create_session(owner_id="b")
+        with pytest.raises(SessionLimitError):
+            manager.create_session(owner_id="c")
+
 
 # --- prompt assembly -------------------------------------------------------
 
@@ -262,53 +311,33 @@ class TestBuildMessages:
         assert tail[-1]["text"].strip() != ""
 
 
-# --- audio -----------------------------------------------------------------
+# --- voice uploads ---------------------------------------------------------
 
 
-class TestAudio:
-    def test_stereo_downmix(self):
-        interleaved = np.array([1.0, 3.0, 2.0, 4.0], dtype=np.float32)  # L,R,L,R
-        assert np.allclose(_to_mono(interleaved, 2), [2.0, 3.0])
+class TestVoiceUpload:
+    @pytest.mark.parametrize(
+        "content_type, expected",
+        [
+            ("audio/webm;codecs=opus", "webm"),
+            ("audio/webm", "webm"),
+            ("audio/mp4", "mp4"),
+            ("audio/ogg; codecs=opus", "ogg"),
+            ("AUDIO/WEBM", "webm"),
+        ],
+    )
+    def test_browser_recording_types_are_accepted(self, content_type, expected):
+        assert audio_extension(content_type) == expected
 
-    def test_mono_passthrough(self):
-        mono = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-        assert np.allclose(_to_mono(mono, 1), mono)
+    @pytest.mark.parametrize("content_type", [None, "", "text/html", "application/pdf", "video/webm"])
+    def test_other_types_are_refused(self, content_type):
+        assert audio_extension(content_type) is None
 
-    def test_ragged_stereo_frame_does_not_crash(self):
-        # A truncated final chunk must not raise on reshape.
-        ragged = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-        assert len(_to_mono(ragged, 2)) == 1
+    @pytest.mark.parametrize("text", ["", "  ", "Thank you.", "you", "Thanks for watching!"])
+    def test_whisper_silence_artefacts_are_detected(self, text):
+        assert is_silence(text)
 
-    @pytest.mark.parametrize("src_rate", [44100, 48000, 16000, 22050])
-    def test_resample_hits_the_target_length(self, src_rate):
-        one_second = np.zeros(src_rate, dtype=np.float32)
-        out = _resample(one_second, src_rate)
-        assert abs(len(out) - 16000) <= 2
-
-    def test_resample_preserves_a_tone(self):
-        # A 440 Hz sine at 48k, downsampled, should still be a 440 Hz sine.
-        t = np.arange(48000) / 48000
-        tone = np.sin(2 * np.pi * 440 * t).astype(np.float32)
-        out = _resample(tone, 48000)
-        peak_bin = int(np.argmax(np.abs(np.fft.rfft(out))))
-        assert abs(peak_bin - 440) <= 2
-
-    def test_normalise_reaches_the_target_rms(self):
-        quiet = (np.random.default_rng(0).standard_normal(16000) * 0.005).astype(np.float32)
-        out = _normalise(quiet)
-        assert 0.01 < float(np.sqrt(np.mean(out**2))) <= 0.06
-
-    def test_normalise_does_not_amplify_silence_into_noise(self):
-        near_silence = np.full(1000, 1e-7, dtype=np.float32)
-        out = _normalise(near_silence)
-        assert float(np.max(np.abs(out))) < 0.01
-
-    def test_normalise_never_clips(self):
-        loud = np.ones(1000, dtype=np.float32) * 0.9
-        assert float(np.max(np.abs(_normalise(loud)))) <= 1.0
-
-    def test_normalise_handles_empty_input(self):
-        assert len(_normalise(np.zeros(0, dtype=np.float32))) == 0
+    def test_real_questions_are_not_silence(self):
+        assert not is_silence("Tell me about a time you disagreed with your manager.")
 
 
 # --- ASR vocabulary hint ---------------------------------------------------

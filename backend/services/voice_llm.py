@@ -1,8 +1,8 @@
 """
 Voice answer generation.
 
-Consumes transcripts, keeps a rolling conversation memory, streams tokens back
-through callbacks. Supports openai | groq | anthropic.
+Takes a transcript plus the session's conversation memory and streams the
+answer. Supports openai | groq | anthropic.
 
 Each provider now reads its own API key. The previous build read
 OPENAI_API_KEY regardless of `LLM_PROVIDER`, so selecting groq or anthropic
@@ -11,15 +11,13 @@ screenshot analysis, since vision reads the same variable.
 """
 
 import logging
-import queue
-import threading
-from collections import deque
+from typing import AsyncIterator
 
 from config import settings
+from services.credentials import get_groq_client, get_openai_client
 
 logger = logging.getLogger(__name__)
 
-LLM_MEMORY_TURNS = 10
 LLM_MAX_TOKENS = 1024
 LLM_TEMPERATURE = 0.4
 
@@ -68,156 +66,77 @@ def build_system_prompt(profile: dict | None = None) -> str:
     return "".join(parts)
 
 
-class LLMClient:
-    """Unified streaming interface across the three supported providers."""
+SUPPORTED_PROVIDERS = ("openai", "groq", "anthropic")
 
-    def __init__(self, api_key: str):
-        self.provider = settings.llm_provider
-        self.model = settings.llm_model
 
-        if self.provider not in ("openai", "groq", "anthropic"):
-            raise ValueError(
-                f"Unknown LLM_PROVIDER '{self.provider}'. "
-                "Expected one of: openai, groq, anthropic."
-            )
-        if not api_key:
-            raise ValueError(f"No API key available for LLM_PROVIDER '{self.provider}'.")
+class VoiceConfigError(Exception):
+    """The server's voice configuration cannot work. Safe to show users."""
 
-        if self.provider == "openai":
-            from openai import OpenAI
 
-            self._client = OpenAI(api_key=api_key)
-        elif self.provider == "groq":
-            from groq import Groq
+_anthropic_base = None
 
-            self._client = Groq(api_key=api_key)
-        elif self.provider == "anthropic":
-            try:
-                import anthropic
-            except ImportError as exc:
-                raise ValueError(
-                    "LLM_PROVIDER=anthropic requires the anthropic package: pip install anthropic"
-                ) from exc
-            self._client = anthropic.Anthropic(api_key=api_key)
-        else:
-            raise ValueError(
-                f"Unknown LLM_PROVIDER '{self.provider}'. Expected one of: openai, groq, anthropic."
-            )
 
-        logger.info("Voice LLM provider: %s | model: %s", self.provider, self.model)
+def _anthropic_client(api_key: str):
+    global _anthropic_base
+    try:
+        import anthropic
+    except ImportError as exc:
+        raise VoiceConfigError(
+            "LLM_PROVIDER=anthropic requires the anthropic package: pip install anthropic"
+        ) from exc
+    if _anthropic_base is None:
+        _anthropic_base = anthropic.AsyncAnthropic(api_key="unused", max_retries=1)
+    return _anthropic_base.with_options(api_key=api_key)
 
-    def stream(self, messages: list[dict]):
-        if self.provider == "anthropic":
-            return self._stream_anthropic(messages)
-        return self._stream_openai_compat(messages)
 
-    def _stream_openai_compat(self, messages):
-        response = self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            max_tokens=LLM_MAX_TOKENS,
-            temperature=LLM_TEMPERATURE,
-            stream=True,
+def build_messages(
+    transcript: str, history: list[dict], profile: dict | None = None
+) -> list[dict]:
+    return [
+        {"role": "system", "content": build_system_prompt(profile)},
+        *history,
+        {"role": "user", "content": transcript},
+    ]
+
+
+async def stream_answer(messages: list[dict], api_key: str) -> AsyncIterator[str]:
+    """Stream answer text from the configured provider."""
+    provider = settings.llm_provider
+    if provider not in SUPPORTED_PROVIDERS:
+        raise VoiceConfigError(
+            f"Unknown LLM_PROVIDER '{provider}'. Expected one of: openai, groq, anthropic."
         )
-        for chunk in response:
+    if not api_key:
+        raise VoiceConfigError(f"No API key available for LLM_PROVIDER '{provider}'.")
+
+    if provider == "anthropic":
+        system = next((m["content"] for m in messages if m["role"] == "system"), "")
+        turns = [m for m in messages if m["role"] != "system"]
+        async with _anthropic_client(api_key).messages.stream(
+            model=settings.llm_model,
+            max_tokens=LLM_MAX_TOKENS,
+            system=system,
+            messages=turns,
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
+        return
+
+    client = get_openai_client(api_key) if provider == "openai" else get_groq_client(api_key)
+    stream = await client.chat.completions.create(
+        model=settings.llm_model,
+        messages=messages,
+        max_tokens=LLM_MAX_TOKENS,
+        temperature=LLM_TEMPERATURE,
+        stream=True,
+    )
+    try:
+        async for chunk in stream:
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
             if delta and delta.content:
                 yield delta.content
-
-    def _stream_anthropic(self, messages):
-        system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
-        user_msgs = [m for m in messages if m["role"] != "system"]
-        with self._client.messages.stream(
-            model=self.model,
-            max_tokens=LLM_MAX_TOKENS,
-            system=system_msg,
-            messages=user_msgs,
-        ) as stream:
-            yield from stream.text_stream
-
-
-class VoiceLLMResponder:
-    """Worker thread: transcript in, streamed answer out."""
-
-    def __init__(
-        self,
-        llm_queue: queue.Queue,
-        on_token_cb=None,
-        on_answer_start_cb=None,
-        on_answer_end_cb=None,
-        on_error_cb=None,
-        profile: dict | None = None,
-        api_key: str = "",
-    ):
-        self.llm_queue = llm_queue
-        self.on_token_cb = on_token_cb
-        self.on_answer_start_cb = on_answer_start_cb
-        self.on_answer_end_cb = on_answer_end_cb
-        self.on_error_cb = on_error_cb
-
-        self._profile = profile
-        self._system_prompt = build_system_prompt(profile)
-        self._memory: deque[dict] = deque(maxlen=LLM_MEMORY_TURNS * 2)
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._llm = LLMClient(api_key)
-
-    def set_profile(self, profile: dict | None):
-        self._profile = profile
-        self._system_prompt = build_system_prompt(profile)
-        logger.info("Voice LLM profile updated.")
-
-    def start(self):
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, name="Thread-VoiceLLM", daemon=True)
-        self._thread.start()
-        logger.info("VoiceLLMResponder thread started.")
-
-    def stop(self):
-        self._stop_event.set()
-        logger.info("VoiceLLMResponder stopped.")
-
-    def clear_memory(self):
-        self._memory.clear()
-        logger.info("Voice conversation memory cleared.")
-
-    def _build_messages(self, user_text: str) -> list[dict]:
-        return [
-            {"role": "system", "content": self._system_prompt},
-            *self._memory,
-            {"role": "user", "content": user_text},
-        ]
-
-    def _run(self):
-        while not self._stop_event.is_set():
-            try:
-                transcript = self.llm_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
-
-            logger.info("Generating answer for: %s", transcript[:80])
-            if self.on_answer_start_cb:
-                self.on_answer_start_cb()
-
-            parts: list[str] = []
-            try:
-                for token in self._llm.stream(self._build_messages(transcript)):
-                    parts.append(token)
-                    if self.on_token_cb:
-                        self.on_token_cb(token)
-
-                answer = "".join(parts)
-                if answer.strip():
-                    # deque(maxlen=...) evicts oldest-first on append, so the
-                    # window trims itself without a manual popleft loop.
-                    self._memory.append({"role": "user", "content": transcript})
-                    self._memory.append({"role": "assistant", "content": answer})
-
-                if self.on_answer_end_cb:
-                    self.on_answer_end_cb()
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Voice LLM error: %s", exc, exc_info=True)
-                if self.on_error_cb:
-                    self.on_error_cb("Could not generate an answer. Check the backend log.")
+    finally:
+        # Stop billing for tokens nobody will read if the client hung up.
+        await stream.close()

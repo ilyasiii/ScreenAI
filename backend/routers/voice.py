@@ -1,81 +1,155 @@
 """
-Voice router - WebSocket interview mode, plus CV/JD PDF extraction.
+Voice router - interview mode, plus CV/JD PDF extraction.
 
-Handshake: the socket opens, the server states which credentials it still
-needs, and the client answers with `init`. Only then is the pipeline built.
-Nothing touches the audio device until that point, so simply opening the page
-no longer seizes the loopback stream.
+The browser captures the interviewer's audio itself (the meeting tab, the
+system output, or a microphone) and records one clip per push-to-talk press.
+Each clip is uploaded here and answered over SSE:
 
-Client -> server:
-  {"action": "init", "credentials": {"groq_key": "...", "openai_key": "..."}}
-  {"action": "start_recording"}
-  {"action": "stop_recording"}
-  {"action": "clear_memory"}
-  {"action": "set_profile", "profile": {"job_title", "job_description", "cv_text"}}
+    POST /api/voice/answer   multipart: session_id, audio, profile (JSON, optional)
 
-Server -> client:
-  {"type": "ready", "needs_groq_key": bool, "needs_llm_key": bool, ...}
-  {"type": "status", "state": "idle|recording|transcribing|answering"}
-  {"type": "transcription", "text": "..."}
-  {"type": "token", "text": "..."}
-  {"type": "done"}
-  {"type": "error", "message": "..."}
-  {"type": "profile_updated"}
+    {"type": "start"}
+    {"type": "transcription", "text": "..."}
+    {"type": "no_speech"}                         nothing intelligible was said
+    {"type": "token", "text": "..."}
+    {"type": "done"}
+    {"type": "error", "code": "...", "message": "...", "provider": "..."}
+
+Keys the server does not hold travel as X-Groq-Api-Key / X-OpenAI-Api-Key /
+X-Anthropic-Api-Key headers. Conversation memory lives in the same per-user
+session store the screen analysis uses, so follow-up questions resolve.
+
+The previous design captured audio on the *server's* sound card (Windows
+WASAPI loopback). That only ever worked with the backend on the user's own PC;
+on a hosted server it would have heard nothing.
 """
 
 import asyncio
-import io
-import json
 import logging
-import queue
+import re
+import threading
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 
-from fastapi import APIRouter, File, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException
 
 from config import settings
-from services.audio_capture import AudioCapture
-from services.audio_processing import AudioProcessor
+from routers.common import SESSION_ID_PATTERN, SSE_HEADERS, Profile, require_session, sse
+from services import pdf_text
+from services.auth import AuthUser
 from services.credentials import (
     MissingCredentialError,
     resolve_groq_key,
     resolve_voice_llm_key,
 )
-from services.voice_llm import VoiceLLMResponder
-from services.voice_transcription import Transcriber
+from services.rate_limit import rate_limited
+from services.voice_llm import VoiceConfigError, build_messages, stream_answer
+from services.voice_transcription import audio_extension, is_silence, transcribe
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["voice"])
 
+# Enough for any real CV or job description; bounds what one upload can make
+# the server hold and send back.
+MAX_PDF_TEXT_CHARS = 60_000
+PDF_TIMEOUT_SECONDS = 20
+# One extraction at a time across the server (each runs in its own process),
+# on a dedicated thread so waiting never ties up the shared default executor,
+# which asyncio also uses for DNS lookups. A short queue absorbs bursts;
+# beyond it, callers are told to retry rather than piling up.
+_PDF_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdf")
+_PDF_MAX_PENDING = 3
+_pdf_pending = 0
+_pdf_pending_lock = threading.Lock()
 
-def _extract_pdf_text(file_bytes: bytes) -> str:
-    # pypdf is the maintained successor to PyPDF2, same API.
-    from pypdf import PdfReader
+_SESSION_ID_RE = re.compile(SESSION_ID_PATTERN)
+# The profile travels as a JSON form field; Profile truncates each value.
+_MAX_PROFILE_FIELD_BYTES = 512 * 1024
 
-    reader = PdfReader(io.BytesIO(file_bytes))
-    pages = [text for page in reader.pages if (text := page.extract_text())]
-    return "\n".join(pages)
+
+@asynccontextmanager
+async def _read_form(request: Request, max_fields: int, max_part_size: int):
+    """Parse a multipart body, only ever after authentication has passed.
+
+    As with JSON bodies (see routers.common.read_json), uploads are read inside
+    the handler, so an anonymous caller is refused before anything is parsed
+    or spooled to disk. Spooled files are closed on exit.
+    """
+    try:
+        form = await request.form(
+            max_files=1, max_fields=max_fields, max_part_size=max_part_size
+        )
+    except MultiPartException as exc:
+        raise HTTPException(status_code=400, detail="Malformed upload.") from exc
+    try:
+        yield form
+    finally:
+        await form.close()
+
+
+async def _extract_pdf(data: bytes) -> str:
+    global _pdf_pending
+    with _pdf_pending_lock:
+        if _pdf_pending >= _PDF_MAX_PENDING:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "server_busy", "message": "The server is busy. Try again shortly."},
+                headers={"Retry-After": "10"},
+            )
+        _pdf_pending += 1
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _PDF_POOL,
+            pdf_text.extract_text,
+            data,
+            settings.max_pdf_pages,
+            MAX_PDF_TEXT_CHARS,
+            PDF_TIMEOUT_SECONDS,
+        )
+    finally:
+        with _pdf_pending_lock:
+            _pdf_pending -= 1
+
+
+# --- PDF extraction ----------------------------------------------------------
 
 
 @router.post("/api/parse-pdf")
-async def parse_pdf(file: UploadFile = File(...)):
+async def parse_pdf(
+    request: Request,
+    user: AuthUser = Depends(rate_limited("pdf", lambda: settings.rate_limit_pdf)),
+):
     """Extract text from an uploaded CV or job description."""
-    if not (file.filename or "").lower().endswith(".pdf"):
-        return JSONResponse(status_code=400, content={"error": "Only PDF files are supported."})
+    async with _read_form(request, max_fields=1, max_part_size=1024) as form:
+        upload = form.get("file")
+        if not isinstance(upload, UploadFile):
+            raise HTTPException(status_code=422, detail="A PDF file is required.")
+        content = await upload.read(settings.max_pdf_bytes + 1)
 
-    content = await file.read()
     if len(content) > settings.max_pdf_bytes:
         return JSONResponse(
             status_code=413,
             content={"error": f"PDF exceeds {settings.max_pdf_bytes // (1024 * 1024)} MB limit."},
         )
+    # Check the content, not the filename or the client-declared type.
+    if not content.startswith(b"%PDF-"):
+        return JSONResponse(status_code=400, content={"error": "Only PDF files are supported."})
 
     try:
-        # Parsing is CPU-bound and synchronous. Left on the event loop, a big
-        # PDF would stall every other request, live SSE streams included.
-        loop = asyncio.get_running_loop()
-        text = await loop.run_in_executor(None, _extract_pdf_text, content)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("PDF parse error: %s", exc, exc_info=True)
+        text = await _extract_pdf(content)
+    except pdf_text.PdfTimeout:
+        logger.warning("PDF parse timed out for user %s", user.id)
+        return JSONResponse(
+            status_code=400,
+            content={"error": "That PDF took too long to read. Try pasting the text instead."},
+        )
+    except pdf_text.PdfError as exc:
+        logger.info("PDF parse failed: %s", exc)
         return JSONResponse(status_code=400, content={"error": "Could not read that PDF."})
 
     if not text.strip():
@@ -86,222 +160,177 @@ async def parse_pdf(file: UploadFile = File(...)):
     return {"text": text}
 
 
-class VoiceSession:
-    """The full voice pipeline for one WebSocket connection.
+# --- Voice answers -----------------------------------------------------------
 
-    Worker threads push messages onto an asyncio queue via
-    `loop.call_soon_threadsafe`, which the send task drains.
-    """
 
-    def __init__(self):
-        self._msg_queue: asyncio.Queue | None = None
-        self._loop: asyncio.AbstractEventLoop | None = None
+def _resolve_voice_keys(
+    groq_key: str | None, openai_key: str | None, anthropic_key: str | None
+) -> tuple[str, str]:
+    """(transcription key, answer key), or a 401 naming every missing key."""
+    client_keys = {"groq_key": groq_key, "openai_key": openai_key, "anthropic_key": anthropic_key}
+    needed: list[str] = []
+    asr_key = llm_key = ""
+    refused = False
 
-        self._raw_queue: queue.Queue = queue.Queue(maxsize=500)
-        self._asr_queue: queue.Queue = queue.Queue(maxsize=5)
-        self._llm_queue: queue.Queue = queue.Queue(maxsize=5)
+    try:
+        asr_key = resolve_groq_key(groq_key)
+    except MissingCredentialError as exc:
+        needed.append("groq_key")
+        refused = not exc.client_keys_allowed
+    try:
+        llm_key = resolve_voice_llm_key(client_keys)
+    except MissingCredentialError as exc:
+        needed.append(f"{settings.llm_provider}_key")
+        refused = refused or not exc.client_keys_allowed
 
-        self._capture = AudioCapture(
-            self._raw_queue,
-            on_error_cb=lambda err: self._send({"type": "error", "message": err}),
+    if needed:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "code": "api_key_refused" if refused else "api_key_required",
+                "needed": sorted(set(needed)),
+                "message": (
+                    "This server does not accept API keys from the browser."
+                    if refused
+                    else "API keys are required for voice mode."
+                ),
+            },
         )
-        self._processor = AudioProcessor(self._raw_queue, self._asr_queue)
-        self._transcriber: Transcriber | None = None
-        self._responder: VoiceLLMResponder | None = None
-        self._running = False
-
-    def initialize(
-        self,
-        loop: asyncio.AbstractEventLoop,
-        msg_queue: asyncio.Queue,
-        groq_key: str,
-        llm_key: str,
-    ):
-        self._loop = loop
-        self._msg_queue = msg_queue
-
-        self._transcriber = Transcriber(
-            asr_queue=self._asr_queue,
-            llm_queue=self._llm_queue,
-            api_key=groq_key,
-            on_start_cb=lambda: self._send({"type": "status", "state": "transcribing"}),
-            on_result_cb=lambda text: self._send({"type": "transcription", "text": text}),
-            on_error_cb=lambda err: self._send({"type": "error", "message": err}),
-        )
-
-        self._responder = VoiceLLMResponder(
-            llm_queue=self._llm_queue,
-            on_token_cb=lambda tok: self._send({"type": "token", "text": tok}),
-            on_answer_start_cb=lambda: self._send({"type": "status", "state": "answering"}),
-            on_answer_end_cb=lambda: self._send({"type": "done"}),
-            on_error_cb=lambda err: self._send({"type": "error", "message": err}),
-            api_key=llm_key,
-        )
-
-    def start_pipeline(self):
-        if self._running:
-            return
-        self._capture.start()
-        self._processor.start()
-        self._transcriber.start()
-        self._responder.start()
-        self._running = True
-        logger.info("Voice pipeline started.")
-
-    def stop_pipeline(self):
-        if not self._running:
-            return
-        self._capture.stop()
-        self._processor.stop()
-        self._transcriber.stop()
-        self._responder.stop()
-        self._running = False
-        logger.info("Voice pipeline stopped.")
-
-    def start_recording(self):
-        self._processor.on_key_press()
-        self._send({"type": "status", "state": "recording"})
-
-    def stop_recording(self):
-        self._processor.on_key_release()
-        self._send({"type": "status", "state": "transcribing"})
-
-    def clear_memory(self):
-        if self._responder:
-            self._responder.clear_memory()
-        self._send({"type": "status", "state": "idle"})
-
-    def set_profile(self, profile: dict | None):
-        if self._responder:
-            self._responder.set_profile(profile)
-        if self._transcriber:
-            # The same profile also biases Whisper's vocabulary, so role-specific
-            # jargon survives the transcript instead of being mangled before the
-            # answering model ever sees it.
-            self._transcriber.set_profile(profile)
-        self._send({"type": "profile_updated"})
-
-    def _send(self, msg: dict):
-        """Thread-safe hand-off to the WebSocket send task."""
-        if self._loop and self._msg_queue and not self._loop.is_closed():
-            try:
-                self._loop.call_soon_threadsafe(self._msg_queue.put_nowait, msg)
-            except RuntimeError:
-                # Loop shut down while a worker thread was still running.
-                pass
+    return asr_key, llm_key
 
 
-def _credentials_needed() -> dict:
-    """Which keys this server cannot supply from its own configuration."""
+def _provider_error(exc: Exception, provider: str, request_id: str) -> dict:
+    """Map an upstream failure to an event the browser can act on."""
+    status = getattr(exc, "status_code", None)
+    if status in (401, 403):
+        logger.warning("[%s] %s key rejected", request_id, provider)
+        return {
+            "type": "error",
+            "code": "invalid_api_key",
+            "provider": provider,
+            "message": f"Your {provider} API key was rejected. Check it and try again.",
+        }
+    if status == 429:
+        logger.warning("[%s] %s rate limited", request_id, provider)
+        return {
+            "type": "error",
+            "code": "rate_limited",
+            "provider": provider,
+            "message": f"The {provider} key is rate limited or out of quota.",
+        }
+    logger.error("[%s] %s call failed: %s", request_id, provider, exc, exc_info=True)
     return {
-        "needs_groq_key": not settings.groq_api_key,
-        "needs_llm_key": not settings.voice_llm_key(),
-        "llm_provider": settings.llm_provider,
-        "allows_client_keys": settings.allow_client_keys,
+        "type": "error",
+        "code": "voice_failed",
+        "message": f"Could not answer that. Reference {request_id}.",
     }
 
 
-@router.websocket("/ws/voice")
-async def voice_websocket(websocket: WebSocket):
-    await websocket.accept()
-    logger.info("Voice WebSocket connected.")
+@router.post("/api/voice/answer")
+async def voice_answer(
+    request: Request,
+    x_groq_api_key: str | None = Header(default=None),
+    x_openai_api_key: str | None = Header(default=None),
+    x_anthropic_api_key: str | None = Header(default=None),
+    user: AuthUser = Depends(rate_limited("voice", lambda: settings.rate_limit_voice)),
+):
+    """Transcribe one recorded question and stream the answer.
 
-    loop = asyncio.get_running_loop()
-    msg_queue: asyncio.Queue = asyncio.Queue()
-    session = VoiceSession()
-    started = False
+    Multipart fields: `session_id`, `audio` (the recording), optional `profile`
+    (JSON).
+    """
+    # Keys first: a request that cannot be answered is refused before its
+    # upload is parsed.
+    asr_key, llm_key = _resolve_voice_keys(x_groq_api_key, x_openai_api_key, x_anthropic_api_key)
 
-    try:
-        # Tell the client what it must supply, then wait for `init`. The
-        # pipeline - and the audio device it seizes - stays untouched until the
-        # client has answered, so merely opening the page no longer takes over
-        # the loopback stream.
-        await websocket.send_json({"type": "ready", **_credentials_needed()})
+    async with _read_form(
+        request, max_fields=2, max_part_size=_MAX_PROFILE_FIELD_BYTES
+    ) as form:
+        session_id = form.get("session_id")
+        audio = form.get("audio")
+        profile = form.get("profile")
+        if not isinstance(session_id, str) or not _SESSION_ID_RE.match(session_id):
+            raise HTTPException(status_code=422, detail="A valid session_id is required.")
+        if not isinstance(audio, UploadFile):
+            raise HTTPException(status_code=422, detail="An audio recording is required.")
+        session = require_session(session_id, user)
 
-        while not started:
-            raw = await websocket.receive_text()
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if msg.get("action") != "init":
-                continue
+        extension = audio_extension(audio.content_type)
+        if extension is None:
+            raise HTTPException(status_code=415, detail="Unsupported audio format.")
 
-            credentials = msg.get("credentials") or {}
-            try:
-                groq_key = resolve_groq_key(credentials.get("groq_key"))
-                llm_key = resolve_voice_llm_key(credentials)
-            except MissingCredentialError as exc:
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "code": (
-                            "api_key_required" if exc.client_keys_allowed else "api_key_refused"
-                        ),
-                        "provider": exc.provider,
-                        "message": (
-                            f"An API key for {exc.provider} is required for voice mode."
-                            if exc.client_keys_allowed
-                            else "This server does not accept API keys from the browser."
-                        ),
-                    }
-                )
-                # Stay open: the user can enter a key and send `init` again.
-                continue
+        clip = await audio.read(settings.max_audio_bytes + 1)
 
-            try:
-                session.initialize(loop, msg_queue, groq_key, llm_key)
-                # Loading the VAD model and opening a WASAPI stream both block.
-                await loop.run_in_executor(None, session.start_pipeline)
-            except ValueError as exc:
-                # Configuration the user can act on: unknown provider, missing
-                # optional package. Keep the socket open.
-                await websocket.send_json({"type": "error", "message": str(exc)})
-                continue
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Failed to start voice pipeline: %s", exc, exc_info=True)
-                await websocket.send_json(
-                    {
-                        "type": "error",
-                        "message": "Could not start audio capture. Check the backend log.",
-                    }
-                )
-                await websocket.close()
-                return
+    if len(clip) > settings.max_audio_bytes:
+        raise HTTPException(status_code=413, detail="Recording is too long.")
+    if len(clip) < 1024:
+        raise HTTPException(status_code=400, detail="Recording is empty.")
+    if profile is not None and not isinstance(profile, str):
+        profile = None
 
-            started = True
-            await websocket.send_json({"type": "status", "state": "idle"})
+    profile_data: dict | None = None
+    if profile:
+        try:
+            profile_data = Profile.model_validate_json(profile).as_dict()
+        except ValidationError:
+            profile_data = None
 
-        async def _read_client():
-            while True:
-                data = await websocket.receive_text()
-                try:
-                    msg = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
+    history = session.conversation_history()
 
-                action = msg.get("action")
-                if action == "start_recording":
-                    session.start_recording()
-                elif action == "stop_recording":
-                    session.stop_recording()
-                elif action == "clear_memory":
-                    session.clear_memory()
-                elif action == "set_profile":
-                    session.set_profile(msg.get("profile"))
+    async def event_generator():
+        request_id = uuid.uuid4().hex[:8]
+        yield sse({"type": "start"})
 
-        async def _send_to_client():
-            while True:
-                await websocket.send_json(await msg_queue.get())
+        try:
+            transcript = await transcribe(clip, extension, asr_key, profile_data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            yield sse(_provider_error(exc, "groq", request_id))
+            return
 
-        await asyncio.gather(_read_client(), _send_to_client())
+        if is_silence(transcript):
+            yield sse({"type": "no_speech"})
+            yield sse({"type": "done"})
+            return
 
-    except WebSocketDisconnect:
-        logger.info("Voice WebSocket disconnected.")
-    except Exception as exc:  # noqa: BLE001
-        logger.error("Voice WebSocket error: %s", exc, exc_info=True)
-    finally:
-        # Closing the audio device blocks; keep it off the event loop so a
-        # shutdown cannot stall other connections.
-        if started:
-            await loop.run_in_executor(None, session.stop_pipeline)
+        yield sse({"type": "transcription", "text": transcript})
+
+        parts: list[str] = []
+        try:
+            async for token in stream_answer(
+                build_messages(transcript, history, profile_data), llm_key
+            ):
+                parts.append(token)
+                yield sse({"type": "token", "text": token})
+        except asyncio.CancelledError:
+            logger.info("[%s] client disconnected mid-answer", request_id)
+            raise
+        except VoiceConfigError as exc:
+            # Operator configuration (unknown provider, missing package): the
+            # message is ours, so it is safe and useful to show.
+            logger.error("[%s] voice configuration error: %s", request_id, exc)
+            yield sse({"type": "error", "code": "voice_failed", "message": str(exc)})
+            return
+        except Exception as exc:  # noqa: BLE001
+            yield sse(_provider_error(exc, settings.llm_provider, request_id))
+            return
+
+        answer = "".join(parts)
+        if answer.strip():
+            session.add_exchange(transcript, answer)
+        yield sse({"type": "done"})
+
+    return StreamingResponse(
+        event_generator(), media_type="text/event-stream", headers=SSE_HEADERS
+    )
+
+
+@router.post("/api/voice/reset/{session_id}")
+async def voice_reset(
+    session_id: str = Path(pattern=SESSION_ID_PATTERN),
+    user: AuthUser = Depends(rate_limited("light", lambda: settings.rate_limit_light)),
+):
+    """Forget the conversation so far."""
+    require_session(session_id, user).clear_conversation()
+    return {"status": "ok"}

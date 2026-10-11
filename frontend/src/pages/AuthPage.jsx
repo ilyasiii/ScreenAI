@@ -1,6 +1,7 @@
 import { useState, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/auth-context";
+import { MIN_PASSWORD_LENGTH } from "../config";
 import "./AuthPage.css";
 
 /* Eye icons for password toggle */
@@ -48,6 +49,10 @@ export default function AuthPage() {
       const confirmPassword = confirmPasswordRef.current?.value || "";
       if (!name.trim()) {
         setError("Please enter your name.");
+        return;
+      }
+      if (password.length < MIN_PASSWORD_LENGTH) {
+        setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
         return;
       }
       if (password !== confirmPassword) {
@@ -220,7 +225,10 @@ export default function AuthPage() {
                 type={showPassword ? "text" : "password"}
                 placeholder="••••••••"
                 required
-                minLength={6}
+                // Existing accounts may predate the 8-character rule, so the
+                // stricter minimum applies to new passwords only.
+                minLength={mode === "signup" ? MIN_PASSWORD_LENGTH : undefined}
+                autoComplete={mode === "signup" ? "new-password" : "current-password"}
               />
               <button
                 type="button"
@@ -244,7 +252,8 @@ export default function AuthPage() {
                   type={showConfirmPassword ? "text" : "password"}
                   placeholder="••••••••"
                   required
-                  minLength={6}
+                  minLength={MIN_PASSWORD_LENGTH}
+                  autoComplete="new-password"
                 />
                 <button
                   type="button"

@@ -1,47 +1,76 @@
 /**
  * Backend client.
  *
- * Two things worth knowing:
+ * Three things worth knowing:
  *
- * 1. Sessions self-heal. The backend 404s unknown session IDs instead of
+ * 1. Every request carries the user's Supabase access token. The backend
+ *    refuses anything without one, so it cannot be used by people who are not
+ *    signed in to this site.
+ *
+ * 2. Sessions self-heal. The backend 404s unknown session IDs instead of
  *    silently minting one, so this module catches `session_not_found`, creates
  *    a fresh session and retries once. A backend restart mid-session is now
  *    invisible to the user rather than a wall of failed requests.
  *
- * 2. Streaming goes through fetch, not EventSource, because the request is a
- *    POST with a JSON body. The SSE framing is parsed by hand below.
+ * 3. Streaming goes through fetch, not EventSource, because the requests are
+ *    POSTs with a body. The SSE framing is parsed by hand below.
  */
 import axios from "axios";
 
 import { API_BASE, API_ORIGIN } from "../config";
-import { getOpenAIKey } from "./credentials";
+import { supabase } from "../lib/supabase";
+import { getOpenAIKey, loadCredentials } from "./credentials";
 
 /** Error thrown when the backend has no key and the user has not supplied one. */
 export class ApiKeyRequiredError extends Error {
-  constructor(message, { refused = false } = {}) {
+  constructor(message, { refused = false, needed = ["openai_key"] } = {}) {
     super(message || "An API key is required.");
     this.name = "ApiKeyRequiredError";
     // `refused` means the operator has disabled client-supplied keys, so
     // prompting the user would achieve nothing.
     this.refused = refused;
+    // Which credential fields to ask for, e.g. ["groq_key", "openai_key"].
+    this.needed = needed;
   }
 }
 
+/** The signed-in user's bearer token. getSession() refreshes it when stale. */
+async function authHeaders() {
+  const { data } = await supabase.auth.getSession();
+  const token = data?.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 /**
- * Headers carrying the user's key, when they have entered one.
+ * Headers carrying the user's own keys, when they have entered any.
  *
- * A header rather than the JSON body: it stays out of request-body logs, and
- * the backend never persists it alongside session state.
+ * Headers rather than the body: they stay out of request-body logs, and the
+ * backend never persists them alongside session state.
  */
 function keyHeaders() {
   const key = getOpenAIKey();
   return key ? { "X-OpenAI-Api-Key": key } : {};
 }
 
+function voiceKeyHeaders() {
+  const { groq_key, openai_key, anthropic_key } = loadCredentials();
+  return {
+    ...(groq_key ? { "X-Groq-Api-Key": groq_key } : {}),
+    ...(openai_key ? { "X-OpenAI-Api-Key": openai_key } : {}),
+    ...(anthropic_key ? { "X-Anthropic-Api-Key": anthropic_key } : {}),
+  };
+}
+
 const api = axios.create({
   baseURL: API_BASE,
   timeout: 120000,
   headers: { "Content-Type": "application/json" },
+});
+
+api.interceptors.request.use(async (config) => {
+  const headers = await authHeaders();
+  for (const [name, value] of Object.entries(headers)) config.headers.set(name, value);
+  return config;
 });
 
 /** True when a failure means "the session is gone, make a new one". */
@@ -51,19 +80,37 @@ function isMissingSession(error) {
 }
 
 /** Convert a 401 from the backend into a typed error the UI can act on. */
-function asKeyError(detail) {
+function asKeyError(detail, fallbackNeeded) {
+  const needed = detail?.needed || fallbackNeeded;
   if (detail?.code === "api_key_required") {
-    return new ApiKeyRequiredError(detail.message);
+    return new ApiKeyRequiredError(detail.message, { needed });
   }
   if (detail?.code === "api_key_refused") {
-    return new ApiKeyRequiredError(detail.message, { refused: true });
+    return new ApiKeyRequiredError(detail.message, { refused: true, needed });
   }
   return null;
+}
+
+/** A user-facing message for a failed request's `detail`. */
+function describe(detail, status) {
+  if (typeof detail === "string") return detail;
+  if (detail?.message) return detail.message;
+  if (status === 429) return "Too many requests. Wait a moment and try again.";
+  return `Request failed (${status})`;
 }
 
 export async function createSession() {
   const { data } = await api.post("/session/create");
   return data.session_id;
+}
+
+/** Best-effort: free a session the page no longer needs. */
+export async function deleteSession(sessionId) {
+  try {
+    await api.delete(`/session/${sessionId}`);
+  } catch {
+    // It expires on its own; nothing to do.
+  }
 }
 
 /**
@@ -111,9 +158,46 @@ export async function clearContext(sessionId, onNewSession) {
   );
 }
 
+/** Forget the voice conversation so far. */
+export async function resetVoiceMemory(sessionId, onNewSession) {
+  return withSession(
+    sessionId,
+    async (id) => {
+      const { data } = await api.post(`/voice/reset/${id}`);
+      return data;
+    },
+    onNewSession
+  );
+}
+
 export async function checkHealth() {
-  const { data } = await axios.get(`${API_ORIGIN}/health`, { timeout: 5000 });
+  const { data } = await axios.get(`${API_ORIGIN}/health`, { timeout: 8000 });
   return data;
+}
+
+/**
+ * Extract text from a PDF on the backend.
+ * @returns {Promise<string>} the text
+ * @throws {Error} with a user-facing message
+ */
+export async function parsePdf(file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  let response;
+  try {
+    response = await fetch(`${API_BASE}/parse-pdf`, {
+      method: "POST",
+      headers: await authHeaders(),
+      body: formData,
+    });
+  } catch {
+    throw new Error("Upload failed. Check your connection and try again.");
+  }
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.error || describe(data.detail, response.status));
+  }
+  return data.text;
 }
 
 /**
@@ -153,6 +237,116 @@ export function parseSSE(buffer) {
 }
 
 /**
+ * POST to a streaming endpoint and dispatch its SSE events.
+ *
+ * Handles the shared failure paths: an expired session is replaced and the
+ * request replayed once, and a missing key is surfaced through onKeyRequired.
+ *
+ * @param {object} opts
+ * @param {string} opts.path
+ * @param {string} opts.sessionId
+ * @param {(id: string) => {body: BodyInit, headers: object}} opts.buildRequest
+ * @param {(event: object) => void} opts.onEvent
+ * @param {string[]} opts.defaultNeeded  key fields to ask for on a bare 401
+ * @returns {() => void} abort
+ */
+function streamRequest({
+  path,
+  sessionId,
+  buildRequest,
+  onEvent,
+  onError,
+  onNewSession,
+  onKeyRequired,
+  defaultNeeded,
+}) {
+  const controller = new AbortController();
+
+  const run = async (id, isRetry = false) => {
+    const { body, headers } = buildRequest(id);
+    const response = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { ...(await authHeaders()), ...headers },
+      body,
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      const detail = payload?.detail;
+
+      // Session expired (backend restart, or idle past the TTL): make a new
+      // one and replay the request once.
+      if (response.status === 404 && detail?.code === "session_not_found" && !isRetry) {
+        const fresh = await createSession();
+        onNewSession?.(fresh);
+        return run(fresh, true);
+      }
+
+      // The backend has no key of its own and we sent none (or it was
+      // rejected). Surface this as its own error so the caller can prompt.
+      const keyError = asKeyError(detail, defaultNeeded);
+      if (keyError && onKeyRequired) {
+        onKeyRequired(keyError);
+        return;
+      }
+
+      onError(describe(detail, response.status));
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const { events, rest } = parseSSE(buffer);
+      buffer = rest;
+
+      for (const event of events) {
+        if (event.type === "done" || event.type === "error") finished = true;
+        // A rejected key is recoverable: let the caller re-prompt rather
+        // than showing an error the user cannot act on.
+        if (event.type === "error" && event.code === "invalid_api_key" && onKeyRequired) {
+          onKeyRequired(
+            new ApiKeyRequiredError(event.message, {
+              needed: event.provider ? [`${event.provider}_key`] : defaultNeeded,
+            })
+          );
+        } else if (event.type === "error") {
+          onError(event.message || "Request failed");
+        } else {
+          onEvent(event);
+        }
+      }
+    }
+
+    // The stream closed without saying it was done: the connection dropped,
+    // the server restarted, or a proxy timed out. Without this the UI would
+    // sit on "Generating answer…" forever.
+    if (!finished) onError("The connection was interrupted. Try again.");
+  };
+
+  // Set once a terminal event has been delivered, so a late network failure
+  // cannot report an error for a request that already completed.
+  let finished = false;
+
+  run(sessionId).catch((err) => {
+    if (err.name === "AbortError" || finished) return;
+    finished = true;
+    // fetch() rejects with a TypeError for network failures in every browser,
+    // each with its own message ("Failed to fetch", "Load failed", ...).
+    onError(err instanceof TypeError ? "Cannot reach the server." : err.message);
+  });
+
+  return () => controller.abort();
+}
+
+/**
  * Analyse the current screen, streaming the answer back as it is generated.
  *
  * @param {object} opts
@@ -180,11 +374,11 @@ export function analyzeScreenStream({
   onNewSession,
   onKeyRequired,
 }) {
-  const controller = new AbortController();
-
-  const run = async (id, isRetry = false) => {
-    const response = await fetch(`${API_BASE}/analyze/stream`, {
-      method: "POST",
+  return streamRequest({
+    path: "/analyze/stream",
+    sessionId,
+    defaultNeeded: ["openai_key"],
+    buildRequest: (id) => ({
       headers: { "Content-Type": "application/json", ...keyHeaders() },
       body: JSON.stringify({
         session_id: id,
@@ -192,84 +386,77 @@ export function analyzeScreenStream({
         question,
         ...(profile ? { profile } : {}),
       }),
-      signal: controller.signal,
-    });
-
-    if (!response.ok) {
-      const body = await response.json().catch(() => null);
-      const detail = body?.detail;
-
-      // Session expired (backend restart, or idle past the TTL): make a new
-      // one and replay the request once.
-      if (response.status === 404 && detail?.code === "session_not_found" && !isRetry) {
-        const fresh = await createSession();
-        onNewSession?.(fresh);
-        return run(fresh, true);
+    }),
+    onEvent: (event) => {
+      if (event.type === "start") onStart?.();
+      else if (event.type === "token") onToken(event.text);
+      else if (event.type === "done") {
+        onDone({
+          context_count: event.context_count,
+          context_tokens: event.context_tokens,
+          usage: event.usage || null,
+        });
       }
-
-      // The backend has no key of its own and we sent none (or it was
-      // rejected). Surface this as its own error so the caller can prompt.
-      const keyError = asKeyError(detail);
-      if (keyError) {
-        onKeyRequired?.(keyError);
-        return;
-      }
-
-      onError(
-        typeof detail === "string"
-          ? detail
-          : detail?.message || `Request failed (${response.status})`
-      );
-      return;
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const { events, rest } = parseSSE(buffer);
-      buffer = rest;
-
-      for (const event of events) {
-        switch (event.type) {
-          case "start":
-            onStart?.();
-            break;
-          case "token":
-            onToken(event.text);
-            break;
-          case "done":
-            onDone({
-              context_count: event.context_count,
-              context_tokens: event.context_tokens,
-              usage: event.usage || null,
-            });
-            break;
-          case "error":
-            // A rejected key is recoverable: let the caller re-prompt rather
-            // than showing an error the user cannot act on.
-            if (event.code === "invalid_api_key" && onKeyRequired) {
-              onKeyRequired(new ApiKeyRequiredError(event.message));
-            } else {
-              onError(event.message || "Analysis failed");
-            }
-            break;
-          default:
-            break;
-        }
-      }
-    }
-  };
-
-  run(sessionId).catch((err) => {
-    if (err.name === "AbortError") return;
-    onError(err.message || "Stream failed");
+    },
+    onError,
+    onNewSession,
+    onKeyRequired,
   });
+}
 
-  return () => controller.abort();
+const AUDIO_EXTENSIONS = { "audio/webm": "webm", "audio/ogg": "ogg", "audio/mp4": "mp4" };
+
+/**
+ * Send one recorded question and stream back its transcript and answer.
+ *
+ * @param {object} opts
+ * @param {string} opts.sessionId
+ * @param {Blob} opts.audio
+ * @param {object|null} opts.profile
+ * @param {(text: string) => void} opts.onTranscription
+ * @param {() => void} opts.onNoSpeech
+ * @param {(text: string) => void} opts.onToken
+ * @param {() => void} opts.onDone
+ * @param {(message: string) => void} opts.onError
+ * @param {string[]} opts.defaultNeeded
+ * @returns {() => void} abort
+ */
+export function voiceAnswerStream({
+  sessionId,
+  audio,
+  profile = null,
+  onTranscription,
+  onNoSpeech,
+  onToken,
+  onDone,
+  onError,
+  onNewSession,
+  onKeyRequired,
+  defaultNeeded = ["groq_key"],
+}) {
+  const baseType = (audio.type || "audio/webm").split(";")[0];
+  const filename = `question.${AUDIO_EXTENSIONS[baseType] || "webm"}`;
+
+  return streamRequest({
+    path: "/voice/answer",
+    sessionId,
+    defaultNeeded,
+    buildRequest: (id) => {
+      const form = new FormData();
+      form.append("session_id", id);
+      form.append("audio", audio, filename);
+      if (profile) form.append("profile", JSON.stringify(profile));
+      // No Content-Type: the browser sets the multipart boundary itself.
+      return { body: form, headers: voiceKeyHeaders() };
+    },
+    onEvent: (event) => {
+      if (event.type === "transcription") onTranscription(event.text);
+      else if (event.type === "no_speech") onNoSpeech();
+      else if (event.type === "token") onToken(event.text);
+      else if (event.type === "done") onDone();
+    },
+    onError,
+    onNewSession,
+    onKeyRequired,
+  });
 }

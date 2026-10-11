@@ -11,6 +11,10 @@ Three deliberate changes from the previous implementation:
     progressively slower and more expensive with every frame pinned.
   * Near-identical frames are rejected. Pinning the same static page twice used
     to store and bill it twice, and gave the model two copies to reconcile.
+
+Every session belongs to the user who created it. Lookups check the owner, so
+a session ID that leaks (logs, a shared screen) is useless to anyone else, and
+the per-user and global caps stop one account from filling server memory.
 """
 
 import threading
@@ -35,8 +39,9 @@ class Screenshot:
 class SessionContext:
     """Screenshot context and conversation history for one session."""
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, owner_id: str = ""):
         self.session_id = session_id
+        self.owner_id = owner_id
         self.screenshots: list[Screenshot] = []
         self.conversation: list[dict] = []
         self.last_activity: float = time.time()
@@ -90,6 +95,10 @@ class SessionContext:
         with self._lock:
             return sum(s.estimated_tokens for s in self.screenshots)
 
+    def context_bytes(self) -> int:
+        with self._lock:
+            return sum(len(s.image_b64) for s in self.screenshots)
+
     def clear_screenshots(self) -> None:
         """Drop pinned frames. Conversation history survives, so follow-up
         questions still resolve pronouns from earlier answers."""
@@ -116,9 +125,18 @@ class SessionContext:
             self.last_activity = time.time()
             return list(self.conversation)
 
+    def clear_conversation(self) -> None:
+        with self._lock:
+            self.conversation = []
+            self.last_activity = time.time()
+
     def touch(self) -> None:
         with self._lock:
             self.last_activity = time.time()
+
+
+class SessionLimitError(Exception):
+    """The server is holding as many sessions as it is allowed to."""
 
 
 class ContextManager:
@@ -128,21 +146,45 @@ class ContextManager:
         self._sessions: dict[str, SessionContext] = {}
         self._lock = threading.Lock()
 
-    def create_session(self) -> str:
+    def create_session(self, owner_id: str = "") -> str:
+        """Create a session for `owner_id`.
+
+        A user at their cap loses their least recently used session rather
+        than being refused: a reloaded tab abandons its old session, and that
+        must not lock the user out until the TTL expires.
+        """
         session_id = str(uuid.uuid4())
         with self._lock:
-            self._sessions[session_id] = SessionContext(session_id)
+            owned = sorted(
+                (ctx for ctx in self._sessions.values() if ctx.owner_id == owner_id),
+                key=lambda ctx: ctx.last_activity,
+            )
+            while owned and len(owned) >= settings.max_sessions_per_user:
+                del self._sessions[owned.pop(0).session_id]
+
+            if len(self._sessions) >= settings.max_sessions_total:
+                raise SessionLimitError()
+
+            self._sessions[session_id] = SessionContext(session_id, owner_id)
         return session_id
 
-    def get(self, session_id: str) -> SessionContext | None:
-        """Look up a session. Returns None for unknown IDs — it never creates
-        one, so callers can 404 instead of leaking a fresh empty session."""
+    def get(self, session_id: str, owner_id: str | None = None) -> SessionContext | None:
+        """Look up a session. Returns None for unknown IDs, and for sessions
+        owned by somebody else, so the two are indistinguishable to a caller.
+        It never creates one."""
         with self._lock:
-            return self._sessions.get(session_id)
+            ctx = self._sessions.get(session_id)
+        if ctx is None or (owner_id is not None and ctx.owner_id != owner_id):
+            return None
+        return ctx
 
-    def delete_session(self, session_id: str) -> bool:
+    def delete_session(self, session_id: str, owner_id: str | None = None) -> bool:
         with self._lock:
-            return self._sessions.pop(session_id, None) is not None
+            ctx = self._sessions.get(session_id)
+            if ctx is None or (owner_id is not None and ctx.owner_id != owner_id):
+                return False
+            del self._sessions[session_id]
+            return True
 
     def cleanup_old_sessions(self, max_age_seconds: int | None = None) -> int:
         """Evict sessions idle past the TTL. Returns how many went."""
@@ -157,6 +199,16 @@ class ContextManager:
     def session_count(self) -> int:
         with self._lock:
             return len(self._sessions)
+
+    def context_bytes(self) -> int:
+        """Bytes of screenshot data held across every session."""
+        with self._lock:
+            sessions = list(self._sessions.values())
+        return sum(s.context_bytes() for s in sessions)
+
+    def has_room_for(self, frame_bytes: int) -> bool:
+        """Whether one more frame fits in the global screenshot budget."""
+        return self.context_bytes() + frame_bytes <= settings.max_context_bytes_total
 
 
 context_manager = ContextManager()

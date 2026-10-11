@@ -33,13 +33,38 @@ logger = logging.getLogger(__name__)
 
 _HASH_SIZE = 8  # dHash grid -> 64-bit fingerprint
 
+# Screen captures arrive as PNG or JPEG (WebP allowed for future clients).
+# Restricting the decoder set keeps Pillow's rarer, historically buggier format
+# plugins unreachable from the network.
+_ALLOWED_FORMATS = ("PNG", "JPEG", "WEBP")
+# The browser already downsizes to 768px on the short side (~1.6 MP), and even
+# a full-resolution 4K frame is 8.3 MP. Anything beyond this is not a
+# screenshot: a few-hundred-KB PNG can declare dimensions whose decoded
+# buffers would need hundreds of megabytes.
+MAX_IMAGE_PIXELS = 12_000_000
+
+# Encoded size above which a frame is re-compressed harder. Screens of text
+# land far below it; a full-screen photo or video frame may not.
+MAX_FRAME_B64_BYTES = 1_500_000
+
 
 def decode_base64_image(image_b64: str) -> Image.Image:
-    """Decode a base64 image, with or without a `data:` URL prefix."""
+    """Decode a base64 image, with or without a `data:` URL prefix.
+
+    Dimensions are checked from the header before any pixel data is decoded,
+    so a decompression bomb is refused without allocating its frame buffer.
+    """
     if image_b64.startswith("data:"):
         image_b64 = image_b64.split(",", 1)[1]
     raw = base64.b64decode(image_b64, validate=False)
-    img = Image.open(io.BytesIO(raw))
+    img = Image.open(io.BytesIO(raw), formats=_ALLOWED_FORMATS)
+    width, height = img.size
+    if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
+        raise ValueError(f"Image dimensions {width}x{height} are out of range.")
+    if img.format == "JPEG":
+        # Let libjpeg decode at a reduced scale when the frame is larger than
+        # needed: less memory, and the final resize still sets exact size.
+        img.draft("RGB", target_size(width, height))
     img.load()
     return img
 
@@ -87,14 +112,36 @@ def prepare_image(image_b64: str) -> tuple[str, dict]:
 
     fingerprint = dhash(img)
 
+    encoded, size = _encode_jpeg(img, settings.image_jpeg_quality, subsampling=0)
+    # A photo or video filling the screen compresses poorly. Step quality down
+    # (and finally subsample chroma, which only text needs) so one frame cannot
+    # pin megabytes of memory per session.
+    for quality, subsampling in ((75, 0), (60, 2)):
+        if len(encoded) <= MAX_FRAME_B64_BYTES:
+            break
+        encoded, size = _encode_jpeg(img, quality, subsampling)
+
+    meta = {
+        "hash": fingerprint,
+        "width": w,
+        "height": h,
+        "original": original,
+        "bytes": size,
+        "estimated_tokens": estimate_tokens(w, h),
+    }
+    return encoded, meta
+
+
+def _encode_jpeg(img: Image.Image, quality: int, subsampling: int) -> tuple[str, int]:
+    """JPEG-encode to base64. Returns (base64 text, encoded byte count)."""
     buf = io.BytesIO()
     img.save(
         buf,
         format="JPEG",
-        quality=settings.image_jpeg_quality,
-        # 4:4:4. Screenshots are coloured text on flat backgrounds; the default
-        # 4:2:0 chroma subsampling bleeds syntax highlighting into the glyphs.
-        subsampling=0,
+        quality=quality,
+        # 0 = 4:4:4. Screenshots are coloured text on flat backgrounds; 4:2:0
+        # chroma subsampling bleeds syntax highlighting into the glyphs.
+        subsampling=subsampling,
         # Deliberately NOT optimize=True. Pillow's optimised Huffman pass needs
         # the whole encoded frame to fit in one MAXBLOCK buffer, and at 4:4:4 a
         # screenshot containing a photo or video overflows it and raises
@@ -102,17 +149,8 @@ def prepare_image(image_b64: str) -> tuple[str, dict]:
         # of file size for a hard failure on exactly the frames that are
         # already the largest.
     )
-    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
-
-    meta = {
-        "hash": fingerprint,
-        "width": w,
-        "height": h,
-        "original": original,
-        "bytes": buf.tell(),
-        "estimated_tokens": estimate_tokens(w, h),
-    }
-    return encoded, meta
+    data = buf.getvalue()
+    return base64.b64encode(data).decode("ascii"), len(data)
 
 
 def dhash(img: Image.Image, size: int = _HASH_SIZE) -> int:

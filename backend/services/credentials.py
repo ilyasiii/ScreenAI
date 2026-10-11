@@ -11,24 +11,26 @@ has none, so enabling this cannot cause a request to silently bill somebody
 else's account, and an operator who has configured a key never has users
 prompted for one.
 
-Client keys are held in memory for the life of the process, never written to
-disk, never logged, and never returned to any client.
+Client keys are used for the one request that carried them: never stored,
+never written to disk, never logged, and never returned to any client.
 """
 
-import asyncio
 import logging
-from collections import OrderedDict
 
-from openai import AsyncOpenAI
+from groq import AsyncGroq
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient
 
 from config import settings
 
 logger = logging.getLogger(__name__)
 
-# One OpenAI client per distinct key. Each holds an HTTP connection pool, so
-# building a fresh one per request would leak sockets under any real load.
-_MAX_CACHED_CLIENTS = 8
-_clients: "OrderedDict[str, AsyncOpenAI]" = OrderedDict()
+# One connection pool for every key. Each user's key gets a lightweight client
+# view over it (`with_options`), so there is nothing per key to cache, evict or
+# close. The previous per-key cache closed an evicted client even while another
+# user's answer was still streaming through it, which cut that answer off as
+# soon as more than a handful of users were active at once.
+_base_client: AsyncOpenAI | None = None
+_base_groq: AsyncGroq | None = None
 
 
 class MissingCredentialError(Exception):
@@ -71,47 +73,40 @@ def resolve_groq_key(client_key: str | None) -> str:
 
 
 def resolve_voice_llm_key(client_keys: dict | None) -> str:
-    """Key for whichever provider answers spoken questions."""
+    """Key for whichever provider answers spoken questions.
+
+    `client_keys` maps `openai_key` / `groq_key` / `anthropic_key` to whatever
+    the browser sent; only the configured provider's entry is consulted.
+    """
     server_key = settings.voice_llm_key()
     if server_key:
         return server_key
 
-    candidate = (client_keys or {}).get(
-        {"openai": "openai_key", "groq": "groq_key", "anthropic": "anthropic_key"}.get(
-            settings.llm_provider, ""
-        )
-    )
+    candidate = (client_keys or {}).get(f"{settings.llm_provider}_key")
     if settings.allow_client_keys and looks_like_key(candidate):
         return candidate.strip()
     raise MissingCredentialError(settings.llm_provider, settings.allow_client_keys)
 
 
 def get_openai_client(api_key: str) -> AsyncOpenAI:
-    """A pooled async client for this key."""
-    existing = _clients.get(api_key)
-    if existing is not None:
-        _clients.move_to_end(api_key)
-        return existing
-
-    client = AsyncOpenAI(api_key=api_key)
-    _clients[api_key] = client
-
-    while len(_clients) > _MAX_CACHED_CLIENTS:
-        _, evicted = _clients.popitem(last=False)
-        _schedule_close(evicted)
-
-    logger.debug("Created OpenAI client for key %s", fingerprint(api_key))
-    return client
+    """An async client for this key, sharing the process-wide connection pool."""
+    global _base_client
+    if _base_client is None:
+        _base_client = AsyncOpenAI(
+            # Placeholder only: every call goes through with_options(api_key=...).
+            api_key="unused",
+            http_client=DefaultAsyncHttpxClient(),
+            max_retries=1,
+        )
+    return _base_client.with_options(api_key=api_key)
 
 
-def _schedule_close(client: AsyncOpenAI) -> None:
-    """Close an evicted client without blocking, if a loop is running."""
-    try:
-        asyncio.get_running_loop().create_task(client.close())
-    except RuntimeError:
-        # No running loop (e.g. during interpreter shutdown). The pool will be
-        # reclaimed with the object.
-        pass
+def get_groq_client(api_key: str) -> AsyncGroq:
+    """An async Groq client for this key, over one shared connection pool."""
+    global _base_groq
+    if _base_groq is None:
+        _base_groq = AsyncGroq(api_key="unused", max_retries=1)
+    return _base_groq.with_options(api_key=api_key)
 
 
 def credential_status() -> dict:

@@ -1,0 +1,43 @@
+# Backend on a Linux server: the API behind Caddy, which obtains and renews
+# the HTTPS certificate for api.screenai.tech automatically.
+#
+# Copy this folder to ~/screenai on the server, add a .env next to it (see
+# backend/.env.example), then:  docker compose up -d
+
+services:
+  backend:
+    image: ghcr.io/ilyasiii/screenai-backend:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      ENVIRONMENT: production
+      # Trust X-Forwarded-* from Caddy. Safe because the backend port is not
+      # published: nothing but Caddy, on this private network, can reach it.
+      FORWARDED_ALLOW_IPS: "*"
+    expose:
+      - "8000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

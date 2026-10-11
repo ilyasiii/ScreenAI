@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { supabase } from "../lib/supabase";
+import { MIN_PASSWORD_LENGTH } from "../config";
 import "./AuthPage.css";
 
 const EyeIcon = (
@@ -61,8 +62,8 @@ export default function ResetPasswordPage() {
     const password = passwordRef.current.value;
     const confirm = confirmRef.current.value;
 
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
       return;
     }
     if (password !== confirm) {
@@ -115,7 +116,8 @@ export default function ResetPasswordPage() {
                 type={showPassword ? "text" : "password"}
                 placeholder="••••••••"
                 required
-                minLength={6}
+                minLength={MIN_PASSWORD_LENGTH}
+                autoComplete="new-password"
               />
               <button
                 type="button"
@@ -137,7 +139,8 @@ export default function ResetPasswordPage() {
                 type={showConfirm ? "text" : "password"}
                 placeholder="••••••••"
                 required
-                minLength={6}
+                minLength={MIN_PASSWORD_LENGTH}
+                autoComplete="new-password"
               />
               <button
                 type="button"

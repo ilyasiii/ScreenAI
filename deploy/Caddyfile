@@ -1,0 +1,26 @@
+api.screenai.tech {
+	encode gzip
+
+	# Matches the backend's MAX_REQUEST_BYTES: oversized uploads are refused
+	# here, before they reach the application.
+	request_body {
+		max_size 12MiB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		-Server
+	}
+
+	# SSE (text/event-stream) responses are flushed immediately by default.
+	# Deliberately no `flush_interval -1`: it also stops Caddy cancelling the
+	# upstream request when the browser disconnects, so a stopped answer would
+	# keep generating (and billing) to the end.
+	reverse_proxy backend:8000 {
+		transport http {
+			# Below uvicorn's 75s keep-alive, so Caddy never reuses a connection
+			# the backend is in the middle of closing (which surfaces as a 502).
+			keepalive 60s
+		}
+	}
+}

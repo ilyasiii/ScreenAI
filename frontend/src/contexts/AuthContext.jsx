@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { supabase } from "../lib/supabase";
 import { AuthContext } from "./auth-context";
+import { clearUserStorage } from "./storage-keys";
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -9,11 +10,10 @@ export function AuthProvider({ children }) {
   const skipAuthRef = useRef(false);
 
   useEffect(() => {
-    // Handle email confirmation tokens in URL hash (from confirmation link)
-    const hash = window.location.hash;
-    if (hash && hash.includes("access_token")) {
-      window.history.replaceState(null, "", window.location.pathname);
-    }
+    // Tokens in the URL (email confirmation, OAuth, password reset) are read
+    // and then cleared from the address bar by supabase-js itself
+    // (detectSessionInUrl). Stripping them here as well raced that read and
+    // could sign the user out of a link they had just clicked.
 
     // Get initial session
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -24,7 +24,10 @@ export function AuthProvider({ children }) {
     // Listen for auth changes (login, logout, token refresh)
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      // Covers sign-out from another tab and server-side session revocation,
+      // not just the button: personal data must not outlive the session.
+      if (event === "SIGNED_OUT") clearUserStorage();
       if (!skipAuthRef.current) setUser(session?.user ?? null);
     });
 
@@ -73,6 +76,9 @@ export function AuthProvider({ children }) {
   };
 
   const signOut = async () => {
+    // Cleared first, so a failed network call cannot leave the CV and API
+    // keys behind on a shared computer.
+    clearUserStorage();
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
   };

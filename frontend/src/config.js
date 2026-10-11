@@ -14,9 +14,6 @@ export const API_ORIGIN = rawApiUrl.replace(/\/+$/, "");
 /** REST base. */
 export const API_BASE = `${API_ORIGIN}/api`;
 
-/** Voice WebSocket, derived from the API origin so the two cannot drift. */
-export const WS_URL = `${API_ORIGIN.replace(/^http/, "ws")}/ws/voice`;
-
 export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "";
 export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 
@@ -40,5 +37,9 @@ export const SUPABASE_CONFIGURED = Boolean(SUPABASE_URL && SUPABASE_ANON_KEY);
 export const CAPTURE_SHORT_SIDE = 768;
 export const CAPTURE_MAX_LONG_SIDE = 2048;
 
-/** Client-side daily analysis cap. Advisory only — the backend does not enforce it. */
-export const DAILY_ANALYSIS_LIMIT = Number(import.meta.env.VITE_DAILY_LIMIT || 0) || null;
+/**
+ * Minimum length for new passwords. Also set Supabase's own minimum to match
+ * (Dashboard -> Authentication -> Providers -> Email), since a client-side
+ * check alone can be bypassed.
+ */
+export const MIN_PASSWORD_LENGTH = 8;

@@ -94,6 +94,10 @@
 }
 
 .record-btn {
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   width: 110px;
   height: 110px;
   border-radius: 50%;
@@ -521,4 +525,115 @@
     width: 80px;
     height: 80px;
   }
+}
+
+/* ── Audio source ── */
+.interview-notice {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  border: 1px solid var(--border-default);
+}
+
+.audio-source-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.audio-source-picker h3 {
+  margin: 0 0 4px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.source-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: border-color var(--duration) var(--ease-out), background var(--duration) var(--ease-out);
+}
+
+.source-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.source-btn:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  background: var(--bg-card);
+}
+
+.source-btn.primary {
+  border-color: rgba(102, 126, 234, 0.45);
+  background: var(--gradient-subtle);
+}
+
+.source-btn svg {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-top: 2px;
+  color: #667eea;
+}
+
+.source-btn span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.source-btn strong {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.source-btn small {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
+.source-change {
+  margin-top: 4px;
+  background: none;
+  border: none;
+  padding: 4px 8px;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.source-change:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.level-meter {
+  width: 140px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--border-default);
+  overflow: hidden;
+}
+
+.level-meter-fill {
+  height: 100%;
+  width: 0;
+  background: var(--gradient-primary);
+  transition: width 60ms linear;
 }
